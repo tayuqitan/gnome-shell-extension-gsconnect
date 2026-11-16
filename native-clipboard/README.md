@@ -18,16 +18,29 @@ meson compile -C native-clipboard/_build
 meson test -C native-clipboard/_build --print-errorlogs
 ```
 
-This does not install anything. For an extension-local package, copy the built
-`GscClipboard-1.0.typelib` and the **real file** behind `libgsc-clipboard-1.so*`
-into its `native/` directory, preserving the SONAME filename
-`libgsc-clipboard-1.so.0` (copy its bytes, not a broken build-tree symlink). The
-Shell loader must prepend that directory to GIRepository's search **and library**
-paths before importing this namespace. The main project owns packaging and
-activation; these commands do not enable an extension or change system files.
+This does not install anything. Build the complete ZIP from the repository root:
 
-`meson install` is deliberately optional, and installs to the explicitly selected
-Meson prefix. It is not necessary for local extension packaging.
+```sh
+meson setup _build \
+  -Dnative_clipboard_build_dir="$PWD/native-clipboard/_build" \
+  -Dnative_clipboard_mutter_api=17
+ninja -C _build make-zip
+```
+
+The root build invokes the native project's official Meson installer with
+`--no-rebuild --destdir` pointing at a temporary directory, never the system or
+live extension directory. This removes Meson's build RPATH. The staged library,
+GIR and typelib are checked for namespace, SONAME and expected Mutter ABI;
+nonempty RPATH/RUNPATH, escaping symlinks and unexpected binaries are rejected.
+The three regular outputs (typelib, `.so.0`, hash manifest) are installed only
+into the root build's extension staging area for ZIP creation. No `.so` is run
+by this structural validation. The native runtime tests must pass separately.
+
+`make-zip` verifies the final archive against the generated expected manifest
+before reporting success or permitting the separate `install-zip` operation.
+Do not run `install-zip` during isolated validation. Leaving the build-dir option
+empty deliberately creates a text-only package; manual `src/native/` copies are
+excluded so a stale or wrong-ABI binary cannot silently enter the ZIP.
 
 ## API
 
@@ -90,23 +103,14 @@ relaxing the production minimum deadline.
    Mutter's private runtime directories from pkg-config for standalone tests.
    Inspect compiler/GIR warnings and every test result, including the real
    60-second deadline, successful actual-loader test, and missing-library test.
-3. Only after the native suite succeeds, stage regular files for ZIP packaging:
-
-   ```sh
-   mkdir -p src/native
-   cp native-clipboard/_build/GscClipboard-1.0.typelib src/native/
-   cp -L native-clipboard/_build/libgsc-clipboard-1.so.0 src/native/
-   readelf -d src/native/libgsc-clipboard-1.so.0
-   # Confirm SONAME is libgsc-clipboard-1.so.0 and NEEDED names match this Mutter ABI.
-   ```
-
-   Do not commit these machine-specific binary outputs. The main project's
-   `install_subdir('src', ...)` and `make-zip` package `src/native/` as `native/`.
-   Use `make-zip`, **not** `install-zip`. This stages/builds an archive; it does
-   not authorize installing or enabling it on the user's desktop.
+3. Only after the native suite succeeds, configure the root build with the two
+   `native_clipboard_*` options above and run `make-zip`. Its automatic stage
+   uses a temporary DESTDIR and rejects build-machine RPATHs. Do not directly
+   copy a raw build `.so`: real isolated builds can contain absolute sysroot
+   RPATHs even when the tests pass. Keep generated binaries out of Git.
 4. Verify the resulting ZIP contains regular, non-symlink entries
-   `native/GscClipboard-1.0.typelib` and `native/libgsc-clipboard-1.so.0` with bytes
-   identical to the staged files. Extract only this locally built archive into
+   `native/GscClipboard-1.0.typelib` and `native/libgsc-clipboard-1.so.0` plus `native/native-clipboard-manifest.json`, with bytes
+   identical to the root build staging outputs. `make-zip` does this automatically. Extract only this locally built archive into
    a fresh temporary directory. Run the actual loader against that extracted
    package with the build directory absent from GI/library search paths:
 

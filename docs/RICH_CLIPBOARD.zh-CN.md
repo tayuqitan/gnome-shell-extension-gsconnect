@@ -115,12 +115,21 @@ SELinux 或系统安全设置来掩盖失败。
 ```sh
 npm install
 
-# 富格式打包前，按 native-clipboard/README.md 构建匹配 ABI 的桥并放入 src/native。
-# 未包含桥的包只保留文本能力。
-meson setup _build
+# 先按 native-clipboard/README.md 构建并测试匹配 ABI 的桥。
+# 以下以 Meta/libmutter API 17 为例，必须按实机版本选择。
+meson setup _build \
+  -Dnative_clipboard_build_dir="$PWD/native-clipboard/_build" \
+  -Dnative_clipboard_mutter_api=17
 meson test -C _build --suite gsconnect:data --suite gsconnect:lint --print-errorlogs
 ninja -C _build make-zip
 ```
+
+打包会将原生桥通过 Meson 安装到临时 DESTDIR（不是系统或桌面），去掉构建期 RPATH，
+并核验 GIR/SONAME/Mutter ABI。ZIP 包内必须包含 typelib、真实 `.so.0` 文件和哈希清单；
+打包后自动检查缺件、符号链接、路径穿越、重复项及字节哈希，失败时删除本次无效 ZIP。
+不指定 `native_clipboard_build_dir` 则明确生成仅文本能力的包。
+旧的手工复制 `src/native` 方法不再参与打包，避免悄悄混入旧 ABI 的二进制。
+这些结构检查不等于真实 GNOME 会话验收。
 
 先保存当前插件版本/安装包，再在两台机器安装构建出的
 `_build/gsconnect@andyholmes.github.io.zip`。按 GNOME 扩展正常流程安装并注销重新登录，

@@ -55,6 +55,26 @@ extconfig.set('SSHKEYGEN_PATH', get_option('sshkeygen_path'))
 
 # ZIP targets for user extension builds
 env_util = find_program('env')
+python = find_program('python3')
+native_package_tool = files('build-aux/ego/native-package.py')
+native_build = get_option('native_clipboard_build_dir')
+if native_build != ''
+  fs = import('fs')
+  native_meson = find_program('meson')
+  if not fs.is_absolute(native_build)
+    error('native_clipboard_build_dir must be absolute')
+  endif
+  custom_target('stage-native-clipboard',
+    input: [native_build / 'GscClipboard-1.0.gir',
+      native_build / 'GscClipboard-1.0.typelib',
+      native_build / 'libgsc-clipboard-1.so.0'],
+    output: ['GscClipboard-1.0.typelib', 'libgsc-clipboard-1.so.0',
+      'native-clipboard-manifest.json'],
+    command: [python, native_package_tool, 'stage', '--build-dir', native_build,
+      '--output-dir', meson.current_build_dir(), '--mutter-api', get_option('native_clipboard_mutter_api'),
+      '--clean-install', '--meson', native_meson.full_path()],
+    build_by_default: true, install: true, install_dir: extdatadir / 'native')
+endif
 
 run_target(
   'make-pkgdir',
@@ -64,6 +84,9 @@ run_target(
     'DATADIR=' + datadir,
     'LOCALEDIR=' + localedir,
     'GSCHEMADIR=' + gschemadir,
+    'PYTHON=' + python.full_path(),
+    'NATIVE_PACKAGE_TOOL=' + meson.current_source_dir() / 'build-aux/ego/native-package.py',
+    'NATIVE_MANIFEST=' + (native_build == '' ? '' : meson.current_build_dir() / 'native-clipboard-manifest.json'),
     'NOZIP=true',
     join_paths(meson.project_source_root(), 'build-aux', 'ego', 'mkzip.sh')
   ]
@@ -78,6 +101,9 @@ run_target(
     'DATADIR=' + datadir,
     'LOCALEDIR=' + localedir,
     'GSCHEMADIR=' + gschemadir,
+    'PYTHON=' + python.full_path(),
+    'NATIVE_PACKAGE_TOOL=' + meson.current_source_dir() / 'build-aux/ego/native-package.py',
+    'NATIVE_MANIFEST=' + (native_build == '' ? '' : meson.current_build_dir() / 'native-clipboard-manifest.json'),
     join_paths(meson.project_source_root(), 'build-aux', 'ego', 'mkzip.sh')
   ]
 )
@@ -90,6 +116,9 @@ run_target(
     'DATADIR=' + datadir,
     'LOCALEDIR=' + localedir,
     'GSCHEMADIR=' + gschemadir,
+    'PYTHON=' + python.full_path(),
+    'NATIVE_PACKAGE_TOOL=' + meson.current_source_dir() / 'build-aux/ego/native-package.py',
+    'NATIVE_MANIFEST=' + (native_build == '' ? '' : meson.current_build_dir() / 'native-clipboard-manifest.json'),
     'INSTALL=true',
     join_paths(meson.project_source_root(), 'build-aux', 'ego', 'mkzip.sh')
   ]
@@ -108,7 +137,8 @@ gnome.post_install(
 install_subdir(
   'src',
   install_dir: extdatadir,
-  strip_directory: true
+  strip_directory: true,
+  exclude_directories: ['native']
 )
 
 eslint = find_program('eslint', required: false)

@@ -111,3 +111,9 @@ option(
   description: 'Install tests'
 )
 
+
+# Optional ABI-specific prebuilt native bridge. No system installation required.
+option('native_clipboard_build_dir', type: 'string', value: '',
+  description: 'Absolute path to a tested native-clipboard Meson build (empty: text-only package)')
+option('native_clipboard_mutter_api', type: 'string', value: '17',
+  description: 'Expected Meta/libmutter ABI for the native clipboard package')
