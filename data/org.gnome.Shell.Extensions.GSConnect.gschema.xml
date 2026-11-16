@@ -22,6 +22,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>true</default>
     </key>
 
+    <key name="experimental-clipboard-paste-gate" type="b">
+      <default>false</default>
+      <summary>Experimental original Ctrl+V gate for file clipboard reads</summary>
+      <description>Requires a session restart. Denies file reads outside a short Ctrl+V window; no simulated input. Not yet validated on RHEL.</description>
+    </key>
+
     <!-- Service Settings -->
     <key name="id" type="s">
       <default>""</default>

@@ -55,13 +55,13 @@ function fixture(timeoutSeconds = 3600) {
     const source = readFileSync(new URL('../../src/shell/clipboard.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/gm, '').replace('export const Clipboard', 'const Clipboard')
         .replace(/^export function /gm, 'function ');
-    const scope = {Gio, GLib, GObject, Meta: {SelectionSource: ObjectBase}, DBus: {}, TextDecoder};
-    vm.runInNewContext(`${source}\nthis.Source = RemoteSelectionSource; this.Portal = Clipboard;`, scope);
+    const scope = {Gio, GLib, GObject, Meta: {SelectionSource: ObjectBase, SelectionType: {SELECTION_CLIPBOARD: 1}}, DBus: {}, TextDecoder};
+    vm.runInNewContext(`${source}\nthis.Source = RemoteSelectionSource; this.Portal = Clipboard; this.setPortal = p => _portal = p; this.unwatch = unwatchService;`, scope);
     const requests = [];
     const cancellations = [];
     const instance = new scope.Source('offer-1', ['image/png', 'text/html'],
         (...args) => requests.push(args), timeoutSeconds, (...args) => cancellations.push(args));
-    return {instance, requests, cancellations, timers, deadlines, Portal: scope.Portal};
+    return {instance, requests, cancellations, timers, deadlines, Portal: scope.Portal, scope};
 }
 
 test('advertises formats without fetching bytes', () => {
@@ -182,4 +182,32 @@ test('reader cancellation notifies service before deferred task cleanup and only
     await Promise.resolve();
     assert.match(result.error.message, /cancelled/);
     assert.equal(cancellations.length, 1);
+});
+
+
+test('configured but inactive gate rejects URI without calling service; other MIME is unchanged', () => {
+    const {Portal} = fixture();
+    const portal = Object.create(Portal.prototype);
+    portal._experimentalPasteGate = true;
+    portal._pasteGate = null;
+    portal._selection = {set_owner() {}};
+    const signals = [];
+    portal.emit = (...args) => signals.push(args);
+    portal.Offer('id', ['text/uri-list', 'image/png']);
+    let result;
+    portal._remoteSource.vfunc_read_async('text/uri-list', null, (_source, task) => { result = task; });
+    assert.throws(() => portal._remoteSource.vfunc_read_finish(result), /Ctrl\+V/);
+    assert.equal(signals.length, 0);
+    portal._remoteSource.vfunc_read_async('image/png', null, () => {});
+    assert.equal(signals[0][0], 'ValueRequested');
+    portal._remoteSource.close();
+});
+
+test('unwatch destroys existing portal even when bus watcher already stopped', () => {
+    const {scope} = fixture();
+    let destroyed = 0;
+    scope.setPortal({destroy() { destroyed++; }});
+    scope.unwatch();
+    scope.unwatch();
+    assert.equal(destroyed, 1);
 });

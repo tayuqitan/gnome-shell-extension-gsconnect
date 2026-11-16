@@ -33,14 +33,49 @@
 - 文件名禁止路径穿越；接收只接受已有请求和准确长度的 payload；来源文件会验证
   身份、大小和修改时间。不要在传输期间修改源文件：这不是文件系统快照机制。
 
-### 不能声称“仅 Ctrl+V 后传输”
+### 默认模式与实验性 Ctrl+V 门控
 
 原生剪贴板 API 给出的是“数据读取”，不是可信的键盘粘贴事件。
 剪贴板历史管理器、预览程序和其他应用也可能请求数据。因此本实现的准确保证是：
 **复制/接收 offer 本身不传正文，读取数据时才传正文。**
-必须在目标 RHEL 会话验证是否存在预读。严格以 Ctrl+V 为唯一触发条件，需要额外的
-桌面/文件管理器集成，或专用的显式“拉取并粘贴”操作；本分支没有实现这个严格门控。
+必须在目标 RHEL 会话验证是否存在预读。默认模式不提供严格的 Ctrl+V 门控。
 也不保证 Windows OLE 对象、私有进程句柄或应用专有格式能跨系统无损重建。
+
+### 可选：不合成按键的门控实验
+
+新选项 `experimental-clipboard-paste-gate` 默认关闭。它仅限制远端文件 URI 格式的读取，
+不限制图片/文字 MIME。启用后，Shell 独占注册 Ctrl+V；在 GNOME 的 `filter-keybinding`
+回调里为当前 offer 与焦点开启短时许可，再返回 true，使 Mutter 将**原始事件**继续交给客户端。
+没有虚拟键盘、F24、自动回放或延迟解绑。复制时以及按键前的文件预读直接失败，不排队到下一次粘贴。
+
+该路径已按 GNOME 48 源码与模拟测试检查，**尚无 RHEL 10.3 / Mutter 实机验证，不是验收完成的保证**。
+仅原始、非重复的 Ctrl+V 按下可授权；松开键不授权。许可过期、焦点/offer 改变、锁屏/扩展禁用、
+抓取冲突或应用抑制快捷键时拒绝读取，不自动退回无门控传输。锁屏/扩展禁用会释放抓取。
+应用必须在短时许可内开始读取；长传输开始后使用正常传输期限。右键菜单粘贴、Shift+Insert、
+应用自定义快捷键在此模式下不触发文件下载。预读失败会被某些应用缓存，仍需逐个应用实测。
+
+限制：Meta.SelectionSource 不提供读取者身份。许可窗口内的其他程序仍可竞争读取，
+不能证明每个请求就是接收到 Ctrl+V 的目标应用，也不保证任意应用会等待大文件传完。
+焦点检查不是安全边界；系统虚拟输入也可能被标记为 PHYSICAL，不能认证实体键盘来源。
+不能将此实验宣传为防止其他本机会话程序访问剪贴板的隔离机制。
+
+测试机启用（安装本分支 schema 后执行，随后注销重新登录；停用同理）：
+
+```sh
+gsettings set org.gnome.Shell.Extensions.GSConnect experimental-clipboard-paste-gate true
+# 停用：gsettings set org.gnome.Shell.Extensions.GSConnect experimental-clipboard-paste-gate false
+```
+
+实机验收至少包括：按键前后台历史管理器预读无网络正文；Ctrl+V 文件粘贴与进度；
+同一 offer 连续粘贴；Ctrl+V release/自动重复不新增许可；焦点切换和锁屏撤销；
+快捷键冲突/抑制情况下仍不下载；取消与多文件长传输；禁用扩展后本机正常 Ctrl+V。
+记录 `gnome-shell --version`、Mutter 软件包版本、应用名称及日志，不仅记录发行版名称。
+
+实现依据（GNOME 48，其他版本需重新核对）：
+[Mutter keybindings.c](https://github.com/GNOME/mutter/blob/gnome-48/src/core/keybindings.c)、
+[ShellWM signal](https://github.com/GNOME/gnome-shell/blob/gnome-48/src/shell-wm.c)、
+[Shell WindowManager](https://github.com/GNOME/gnome-shell/blob/gnome-48/js/ui/windowManager.js)、
+[Clutter current event](https://github.com/GNOME/mutter/blob/gnome-48/clutter/clutter/clutter-main.c)。
 
 ## 结构
 

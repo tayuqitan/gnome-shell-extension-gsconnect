@@ -383,7 +383,12 @@ export default class GSConnectExtension extends Extension {
 
         // This watches for the service to start and exports a custom clipboard
         // portal for use on Wayland
-        Clipboard.watchService();
+        const clipboardSettings = new Gio.Settings({
+            settings_schema: Config.GSCHEMA.lookup(
+                'org.gnome.Shell.Extensions.GSConnect', null),
+        });
+        Clipboard.watchService(clipboardSettings.get_boolean(
+            'experimental-clipboard-paste-gate'));
     }
 
     enable() {
@@ -392,9 +397,11 @@ export default class GSConnectExtension extends Extension {
 
         this.lockscreenInput = new Input.LockscreenRemoteAccess();
         this.lockscreenInput.patchInhibitor();
+        Clipboard.setPasteGateEnabled(true);
     }
 
     disable() {
+        Clipboard.setPasteGateEnabled(false);
         serviceIndicator.destroy();
         serviceIndicator = null;
         Notification.unpatchGtkNotificationSources();

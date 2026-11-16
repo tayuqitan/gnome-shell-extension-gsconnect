@@ -9,6 +9,7 @@ import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 
 import * as DBus from '../service/utils/dbus.js';
+import {ClipboardPasteGate} from './clipboardPasteGate.js';
 
 
 /*
@@ -91,7 +92,8 @@ const DEFAULT_TIMEOUT_SECONDS = 3600;
 const RemoteSelectionSource = GObject.registerClass({
     GTypeName: 'GSConnectRemoteSelectionSource',
 }, class RemoteSelectionSource extends Meta.SelectionSource {
-    _init(id, mimetypes, request, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS, cancel = null) {
+    _init(id, mimetypes, request, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+        cancel = null, guardRead = null) {
         super._init();
         if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 86400)
             throw new Error('Invalid clipboard deadline');
@@ -100,6 +102,7 @@ const RemoteSelectionSource = GObject.registerClass({
         this._mimetypes = mimetypes;
         this._request = request;
         this._cancel = cancel;
+        this._guardRead = guardRead;
         this._pending = new Map();
         this._closed = false;
     }
@@ -119,6 +122,13 @@ const RemoteSelectionSource = GObject.registerClass({
         }
         if (cancellable?.is_cancelled()) {
             task.return_error_if_cancelled();
+            return;
+        }
+        if (this._guardRead && !this._guardRead(this, mimetype)) {
+            task.return_error(new Gio.IOErrorEnum({
+                code: Gio.IOErrorEnum.PERMISSION_DENIED,
+                message: 'Remote files require a local Ctrl+V gesture',
+            }));
             return;
         }
         if (this._pending.size >= 32) {
@@ -230,6 +240,8 @@ export const Clipboard = GObject.registerClass({
     _init(params = {}) {
         super._init();
 
+        this._experimentalPasteGate = Boolean(params.experimentalPasteGate);
+        this._pasteGate = null;
         this._transferring = false;
         this._remoteSource = null;
         this._ownerIdleId = 0;
@@ -252,6 +264,14 @@ export const Clipboard = GObject.registerClass({
             null,
             this._onNameLost.bind(this)
         );
+        this.setPasteGateEnabled(Boolean(params.pasteGateEnabled));
+    }
+
+    setPasteGateEnabled(enabled) {
+        this._pasteGate?.destroy();
+        this._pasteGate = null;
+        if (enabled && this._experimentalPasteGate)
+            this._pasteGate = new ClipboardPasteGate(() => this._remoteSource);
     }
 
     _onOwnerChanged(selection, type, source) {
@@ -260,6 +280,7 @@ export const Clipboard = GObject.registerClass({
             return;
 
         if (this._remoteSource && source !== this._remoteSource) {
+            this._pasteGate?.invalidate();
             this._remoteSource.close();
             this._remoteSource = null;
         }
@@ -448,11 +469,17 @@ export const Clipboard = GObject.registerClass({
                 message: 'Invalid clipboard offer',
             });
         }
+        this._pasteGate?.invalidate();
         if (this._remoteSource)
             this._remoteSource.close();
         this._remoteSource = new RemoteSelectionSource(id, [...new Set(mimetypes)],
             (...args) => this.emit('ValueRequested', ...args), timeoutSeconds,
-            (...args) => this.emit('CancelRequested', ...args));
+            (...args) => this.emit('CancelRequested', ...args),
+            this._experimentalPasteGate ? (source, mimetype) => {
+                if (mimetype !== 'text/uri-list' && mimetype !== 'x-special/gnome-copied-files')
+                    return true;
+                return this._pasteGate?.allows(source) ?? false;
+            } : null);
         this._selection.set_owner(Meta.SelectionType.SELECTION_CLIPBOARD,
             this._remoteSource);
     }
@@ -470,12 +497,14 @@ export const Clipboard = GObject.registerClass({
         if (id !== this._remoteSource?.offerId)
             return;
         const source = this._remoteSource;
+        this._pasteGate?.invalidate();
         this._remoteSource = null;
         source.close();
         this._selection.unset_owner(Meta.SelectionType.SELECTION_CLIPBOARD, source);
     }
 
     destroy() {
+        this.setPasteGateEnabled(false);
         if (this._ownerIdleId) {
             GLib.source_remove(this._ownerIdleId);
             this._ownerIdleId = 0;
@@ -503,11 +532,26 @@ export const Clipboard = GObject.registerClass({
 
 let _portal = null;
 let _portalId = 0;
+let _pasteGateConfigured = false;
+let _pasteGateEnabled = false;
+
+/**
+ * Activate the shortcut observer; opted-in sources stay guarded on disable.
+ *
+ * @param {boolean} enabled - Whether the extension is currently enabled
+ */
+export function setPasteGateEnabled(enabled) {
+    _pasteGateEnabled = Boolean(enabled);
+    _portal?.setPasteGateEnabled(_pasteGateEnabled);
+}
 
 /**
  * Watch for the service to start and export the clipboard portal when it does.
+ *
+ * @param {boolean} experimentalPasteGate - Opt into the experimental URI gate
  */
-export function watchService() {
+export function watchService(experimentalPasteGate = false) {
+    _pasteGateConfigured = Boolean(experimentalPasteGate);
     if (GLib.getenv('XDG_SESSION_TYPE') !== 'wayland')
         return;
 
@@ -519,8 +563,12 @@ export function watchService() {
         'org.gnome.Shell.Extensions.GSConnect',
         Gio.BusNameWatcherFlags.NONE,
         () => {
-            if (_portal === null)
-                _portal = new Clipboard();
+            if (_portal === null) {
+                _portal = new Clipboard({
+                    experimentalPasteGate: _pasteGateConfigured,
+                    pasteGateEnabled: _pasteGateEnabled,
+                });
+            }
         },
         () => {
             if (_portal !== null) {
@@ -538,5 +586,9 @@ export function unwatchService() {
     if (_portalId > 0) {
         Gio.bus_unwatch_name(_portalId);
         _portalId = 0;
+    }
+    if (_portal) {
+        _portal.destroy();
+        _portal = null;
     }
 }
