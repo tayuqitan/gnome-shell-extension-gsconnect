@@ -28,3 +28,18 @@ TLS transfer, Ctrl+V gating and application waiting behavior. The installed olde
 experimental extension remains unchanged; this is not a desktop acceptance claim.
 History still lasts only for the service session. Completed downloaded files are
 never automatically deleted; quota exhaustion rejects new downloads.
+
+## Documentation/UI wording follow-up
+
+The Chinese guide now names clipboard-cache-v2, distinguishes its admission
+allowance from a hard disk quota, and explains legacy-cache exclusion and
+retention. The UI explicitly repeats these limits. Two regression checks cover
+this contract; the complete Node suite now passes 110 tests.
+
+Desktop validation remains blocked: read-only session D-Bus query returned
+`Unable to create socket: Operation not permitted`; GTK 3 `init_check` returned
+false. No Xvfb or nested-compositor executable was available. Native computer
+control is disabled in this connection. No installation, Shell restart,
+clipboard read, pairing change or security-policy modification was attempted.
+ESLint remains unrun: dependencies were unavailable and the stalled npm install
+was cancelled. Empty connector CI status/run lists do not establish a CI pass.
