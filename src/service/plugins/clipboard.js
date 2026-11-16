@@ -6,6 +6,8 @@ import GObject from 'gi://GObject';
 
 import * as Components from '../components/index.js';
 import Plugin from '../plugin.js';
+import RichClipboard, {CAPABILITY} from '../utils/richClipboard.js';
+import ClipboardHistoryDialog from '../utils/clipboardHistoryDialog.js';
 
 
 export const Metadata = {
@@ -13,14 +15,29 @@ export const Metadata = {
     description: _('Share the clipboard content'),
     id: 'org.gnome.Shell.Extensions.GSConnect.Plugin.Clipboard',
     incomingCapabilities: [
+        CAPABILITY,
         'kdeconnect.clipboard',
         'kdeconnect.clipboard.connect',
     ],
     outgoingCapabilities: [
+        CAPABILITY,
         'kdeconnect.clipboard',
         'kdeconnect.clipboard.connect',
     ],
     actions: {
+        clipboardHistory: {
+            label: _('Clipboard History'),
+            icon_name: 'document-open-recent-symbolic',
+            parameter_type: null,
+            incoming: [], outgoing: [],
+        },
+        clipboardCancel: {
+            label: _('Cancel Clipboard Transfer'),
+            icon_name: 'process-stop-symbolic',
+            parameter_type: 's',
+            incoming: [CAPABILITY],
+            outgoing: [],
+        },
         clipboardPush: {
             label: _('Clipboard Push'),
             icon_name: 'edit-paste-symbolic',
@@ -64,10 +81,18 @@ const ClipboardPlugin = GObject.registerClass({
         this._localBuffer = this._clipboard.text;
         this._localTimestamp = 0;
         this._remoteBuffer = null;
+        this._rich = new RichClipboard(this, this._clipboard);
+        this.device.lookup_action('clipboardHistory').set_enabled(true);
     }
 
     connected() {
         super.connected();
+        this._rich.connected();
+
+        if (this._rich.enabled) {
+            this._rich.publish().catch(debug);
+            return;
+        }
 
         // TODO: if we're not auto-syncing local->remote, but we are doing the
         //       reverse, it's possible older remote content will end up
@@ -87,7 +112,20 @@ const ClipboardPlugin = GObject.registerClass({
         });
     }
 
+    disconnected() {
+        this._rich.reset();
+        super.disconnected();
+        this.device.lookup_action('clipboardHistory').set_enabled(true);
+    }
+
     handlePacket(packet) {
+        if (packet.type === CAPABILITY) {
+            this._rich.handle(packet).catch(debug);
+            return;
+        }
+        if (this._rich.enabled)
+            return;
+
         if (!packet.body.hasOwnProperty('content'))
             return;
 
@@ -116,6 +154,8 @@ const ClipboardPlugin = GObject.registerClass({
      * Store the local clipboard content and forward it if enabled
      */
     _onLocalClipboardChanged(clipboard, pspec) {
+        if (this._rich?.enabled)
+            return;
         this._localBuffer = clipboard.text;
         this._localTimestamp = Date.now();
 
@@ -137,6 +177,10 @@ const ClipboardPlugin = GObject.registerClass({
      * Copy to the remote clipboard; called by _onLocalClipboardChanged()
      */
     clipboardPush() {
+        if (this._rich.enabled) {
+            this._rich.publish().catch(debug);
+            return;
+        }
         // Don't sync if the clipboard is empty or not text
         if (this._localTimestamp === 0)
             return;
@@ -161,6 +205,8 @@ const ClipboardPlugin = GObject.registerClass({
      * Copy from the remote clipboard; called by _onRemoteClipboardChanged()
      */
     clipboardPull() {
+        if (this._rich.enabled)
+            return;
         if (this._localBuffer !== this._remoteBuffer) {
             this._localBuffer = this._remoteBuffer;
             this._localTimestamp = Date.now();
@@ -169,7 +215,27 @@ const ClipboardPlugin = GObject.registerClass({
         }
     }
 
+    clipboardHistory() {
+        if (!this._historyDialog || this._historyDialog.destroyed) {
+            this._historyDialog = new ClipboardHistoryDialog(this._rich.history, {
+                peerName: this.device.name,
+                onActivate: entry => this._rich.activateHistory(entry),
+                onLimits: ({maxItems, maxBytes}) => {
+                    this.settings.set_uint('history-max-items', maxItems);
+                    this.settings.set_uint('history-max-bytes', maxBytes);
+                },
+            });
+        }
+        this._historyDialog.show();
+    }
+
+    clipboardCancel(id) {
+        this._rich.cancelDownload(id);
+    }
+
     destroy() {
+        this._historyDialog?.destroy();
+        this._rich.destroy();
         if (this._clipboard && this._textChangedId) {
             this._clipboard.disconnect(this._textChangedId);
             this._clipboard = Components.release('clipboard');

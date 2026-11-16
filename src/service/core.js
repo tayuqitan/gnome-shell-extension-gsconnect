@@ -496,6 +496,9 @@ export const Transfer = GObject.registerClass({
 
         this._cancellable = new Gio.Cancellable();
         this._items = [];
+        // Optional per-item download progress (written bytes, declared total).
+        // Completion is still indicated exclusively by start() resolving.
+        this.onProgress = null;
     }
 
     get channel() {
@@ -673,7 +676,7 @@ export const Transfer = GObject.registerClass({
 
                 if (item.packet.hasPayload()) {
                     await this.channel.download(item.packet, item.target,
-                        this._cancellable);
+                        this._cancellable, this.onProgress);
                 } else {
                     await this.channel.upload(item.packet, item.source,
                         item.size, this._cancellable);

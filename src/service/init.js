@@ -40,6 +40,7 @@ Gio._promisify(Gio.File.prototype, 'replace_async');
 Gio._promisify(Gio.File.prototype, 'replace_contents_bytes_async',
     'replace_contents_finish');
 Gio._promisify(Gio.FileEnumerator.prototype, 'next_files_async');
+Gio._promisify(Gio.FileInputStream.prototype, 'query_info_async');
 Gio._promisify(Gio.Mount.prototype, 'unmount_with_operation');
 Gio._promisify(Gio.InputStream.prototype, 'close_async');
 Gio._promisify(Gio.OutputStream.prototype, 'close_async');

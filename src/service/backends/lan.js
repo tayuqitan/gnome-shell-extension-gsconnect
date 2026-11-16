@@ -9,6 +9,7 @@ import GObject from 'gi://GObject';
 import Config from '../../config.js';
 import * as Core from '../core.js';
 import Device from '../device.js';
+import {copyExact} from '../utils/exactTransfer.js';
 
 // Retain compatibility with GLib < 2.80, which lacks GioUnix
 let GioUnix;
@@ -937,13 +938,54 @@ export const Channel = GObject.registerClass({
             this.output_stream.close_async(GLib.PRIORITY_DEFAULT, null, null);
     }
 
-    async download(packet, target, cancellable = null) {
+    async download(packet, target, cancellable = null, onProgress = null) {
         const address = Gio.InetSocketAddress.new_from_string(this.host,
             packet.payloadTransferInfo.port);
 
         const client = new Gio.SocketClient({enable_proxy: false});
         const connection = await client.connect_async(address, cancellable)
             .then(this._encryptClient.bind(this));
+
+        // The fork's rich clipboard protocol requires exact lengths. Keep
+        // legacy KDE Connect's tolerant splice behavior unchanged below.
+        if (packet.type === 'gsconnect.clipboard.rich') {
+            const read = count => new Promise((resolve, reject) => {
+                connection.input_stream.read_bytes_async(count,
+                    GLib.PRIORITY_DEFAULT, cancellable, (stream, result) => {
+                        try {
+                            resolve(stream.read_bytes_finish(result).get_data());
+                        } catch (error) {
+                            reject(error);
+                        }
+                    });
+            });
+            const close = stream => new Promise((resolve, reject) => {
+                stream.close_async(GLib.PRIORITY_DEFAULT, null, (source, result) => {
+                    try {
+                        source.close_finish(result);
+                        resolve();
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            });
+            let failure = null;
+            try {
+                await copyExact(packet.payloadSize, read, bytes =>
+                    target.write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancellable),
+                onProgress);
+            } catch (error) {
+                failure = error;
+            } finally {
+                // Do not reuse the canceled transfer token for cleanup.
+                const results = await Promise.allSettled([close(target), close(connection)]);
+                if (!failure)
+                    failure = results.find(result => result.status === 'rejected')?.reason;
+            }
+            if (failure)
+                throw failure;
+            return;
+        }
 
         // Start the transfer
         const transferredSize = await target.splice_async(

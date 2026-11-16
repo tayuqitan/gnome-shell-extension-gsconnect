@@ -62,7 +62,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>{}</default>
     </key>
     <key name="menu-actions" type="as">
-      <default>["sms", "ring", "mount", "commands", "share", "keyboard"]</default>
+      <default>["sms", "ring", "mount", "commands", "share", "keyboard", "clipboardHistory"]</default>
     </key>
     <key name="name" type="s">
       <default>""</default>
@@ -110,6 +110,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Clipboard">
+    <key name="history-max-items" type="u">
+      <range min="0" max="1000"/>
+      <default>50</default>
+      <summary>Clipboard history entries retained in this session</summary>
+    </key>
+    <key name="history-max-bytes" type="u">
+      <range min="0" max="1073741824"/>
+      <default>67108864</default>
+      <summary>Clipboard history snapshot budget in bytes</summary>
+    </key>
+    <key name="rich-transfer-timeout" type="u">
+      <range min="60" max="86400"/>
+      <default>3600</default>
+      <summary>Rich clipboard transfer deadline in seconds</summary>
+      <description>Maximum duration for a requested clipboard representation, including all files. Valid range is one minute to one day.</description>
+    </key>
     <key name="receive-content" type="b">
       <default>false</default>
     </key>

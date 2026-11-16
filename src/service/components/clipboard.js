@@ -18,6 +18,9 @@ const DBUS_PATH = '/org/gnome/Shell/Extensions/GSConnect/Clipboard';
  */
 const Clipboard = GObject.registerClass({
     GTypeName: 'GSConnectClipboard',
+    Signals: {
+        'changed': {},
+    },
     Properties: {
         'text': GObject.ParamSpec.string(
             'text',
@@ -34,6 +37,12 @@ const Clipboard = GObject.registerClass({
 
         this._cancellable = new Gio.Cancellable();
         this._clipboard = null;
+        this._mimetypes = [];
+        this._generation = 0;
+        this._available = false;
+        this._offer = null;
+        this._requests = new Set();
+        this._pendingRejects = new Set();
 
         this._ownerChangeId = 0;
         this._nameWatcherId = Gio.bus_watch_name(
@@ -43,6 +52,155 @@ const Clipboard = GObject.registerClass({
             this._onNameAppeared.bind(this),
             this._onNameVanished.bind(this)
         );
+    }
+
+    // Rich clipboard operations require the versioned GNOME Shell portal.
+    get available() {
+        return this._available;
+    }
+
+    get richAvailable() {
+        return this.available;
+    }
+
+    get mimetypes() {
+        return this._mimetypes.slice();
+    }
+
+    get generation() {
+        return this._generation;
+    }
+
+    _call(method, parameters = null, proxy = this._clipboard) {
+        return proxy.call(method, parameters, Gio.DBusCallFlags.NO_AUTO_START,
+            300000, this._cancellable);
+    }
+
+    async readValue(mimetype) {
+        if (!this.available || !this._mimetypes.includes(mimetype))
+            throw new Error('Clipboard format is unavailable');
+
+        const generation = this._generation;
+        const reply = await this._call('GetValue',
+            new GLib.Variant('(s)', [mimetype]));
+        if (generation !== this._generation || this._offer !== null)
+            throw new Error('Clipboard changed while reading');
+
+        const value = reply.deepUnpack()[0];
+        if (value.length > 16 * 1024 * 1024)
+            throw new Error('Clipboard value exceeds 16 MiB');
+        return new Uint8Array(value);
+    }
+
+    async offer(id, mimetypes, callback, timeoutSeconds = 3600) {
+        if (!this.available)
+            throw new Error('Rich clipboard requires the GNOME Shell portal');
+        if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 86400 ||
+            typeof id !== 'string' || !id || id.length > 256 ||
+            !Array.isArray(mimetypes) || mimetypes.length === 0 ||
+            mimetypes.length > 64 || mimetypes.some(type =>
+            typeof type !== 'string' || !type || type.length > 256) ||
+            typeof callback !== 'function')
+            throw new Error('Invalid clipboard offer');
+
+        this._cancelRequests();
+        const offer = {id, mimetypes: mimetypes.slice(), callback, timeoutSeconds};
+        this._offer = offer;
+        this._generation++;
+        this._mimetypes = [];
+        try {
+            await this._call('Offer',
+                new GLib.Variant('(sasu)', [id, mimetypes, timeoutSeconds]));
+        } catch (e) {
+            if (this._offer === offer)
+                this._offer = null;
+            throw e;
+        }
+    }
+
+    async clearOffer(id) {
+        if (this._offer?.id !== id)
+            return;
+        this._cancelRequests();
+        this._offer = null;
+        if (this.available)
+            await this._call('ClearOffer', new GLib.Variant('(s)', [id]));
+    }
+
+    _cancelRequests() {
+        for (const reject of this._pendingRejects)
+            reject(new Error('Clipboard offer expired'));
+        this._pendingRejects.clear();
+    }
+
+    _onProxySignal(proxy, sender, signal, parameters) {
+        if (proxy !== this._clipboard)
+            return;
+        if (signal === 'CancelRequested') {
+            const [id, requestId] = parameters.deepUnpack();
+            this._requestRejects?.get(`${id}:${requestId}`)?.(
+                new Error('Clipboard reader cancelled'));
+        } else if (signal === 'OwnerChange') {
+            this._onOwnerChange();
+        } else if (signal === 'ValueRequested') {
+            this._onValueRequested(proxy, parameters.deepUnpack()).catch(debug);
+        }
+    }
+
+    async _onValueRequested(proxy, [id, requestId, mimetype]) {
+        const offer = this._offer;
+        const key = `${id}:${requestId}`;
+        this._requestRejects ??= new Map();
+        if (!offer || offer.id !== id || !offer.mimetypes.includes(mimetype) ||
+            this._requests.has(key))
+            return;
+
+        let value = new Uint8Array();
+        let error = '';
+        let timeout = 0;
+        let rejectRequest;
+        const requestCancellable = new Gio.Cancellable();
+        try {
+            if (this._requests.size >= 32)
+                throw new Error('Too many clipboard requests');
+            this._requests.add(key);
+            value = await Promise.race([
+                Promise.resolve().then(() => offer.callback(mimetype, requestCancellable)),
+                new Promise((resolve, reject) => {
+                    rejectRequest = reason => {
+                        requestCancellable.cancel();
+                        reject(reason);
+                    };
+                    this._pendingRejects.add(rejectRequest);
+                    this._requestRejects.set(key, rejectRequest);
+                    timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+                        offer.timeoutSeconds, () => {
+                            timeout = 0;
+                            rejectRequest(new Error('Clipboard request timed out'));
+                            return GLib.SOURCE_REMOVE;
+                        });
+                }),
+            ]);
+            if (offer !== this._offer)
+                throw new Error('Clipboard offer expired');
+            if (!(value instanceof Uint8Array) || value.length > 16 * 1024 * 1024)
+                throw new Error('Invalid or oversized clipboard data');
+        } catch (e) {
+            value = new Uint8Array();
+            error = 'Clipboard data unavailable';
+            debug(e);
+        } finally {
+            requestCancellable.cancel();
+            this._pendingRejects.delete(rejectRequest);
+            this._requestRejects.delete(key);
+            if (timeout)
+                GLib.source_remove(timeout);
+            this._requests.delete(key);
+        }
+        if (proxy === this._clipboard && !this._cancellable.is_cancelled()) {
+            await this._call('Resolve',
+                new GLib.Variant('(ssays)', [id, requestId, value, error]), proxy);
+        }
     }
 
     get text() {
@@ -93,24 +251,17 @@ const Clipboard = GObject.registerClass({
                 this._cancellable);
 
             this._ownerChangeId = this._clipboard.connect('g-signal',
-                this._onOwnerChange.bind(this));
+                this._onProxySignal.bind(this));
 
             this._onOwnerChange();
-            if (!globalThis.HAVE_GNOME) {
-                // Directly subscrible signal
+            // wl-paste's dbus-send emits from its own unique bus sender.
+            if (!globalThis.HAVE_GNOME && !this.signalHandler) {
                 this.signalHandler = Gio.DBus.session.signal_subscribe(
-                    null,
-                    DBUS_NAME,
-                    'OwnerChange',
-                    DBUS_PATH,
-                    null,
-                    Gio.DBusSignalFlags.NONE,
-                    this._onOwnerChange.bind(this)
-                );
+                    null, DBUS_NAME, 'OwnerChange', DBUS_PATH, null,
+                    Gio.DBusSignalFlags.NONE, this._onOwnerChange.bind(this));
             }
-
         } catch (e) {
-            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
                 debug(e);
                 this._onNameVanished(null, null);
             }
@@ -118,11 +269,19 @@ const Clipboard = GObject.registerClass({
     }
 
     _onNameVanished(connection, name) {
+        if (this.signalHandler) {
+            Gio.DBus.session.signal_unsubscribe(this.signalHandler);
+            this.signalHandler = 0;
+        }
         if (this._clipboard && this._ownerChangeId > 0) {
             this._clipboard.disconnect(this._ownerChangeId);
-            this._clipboardChangedId = 0;
+            this._ownerChangeId = 0;
         }
 
+        this._available = false;
+        this._cancelRequests();
+        this._offer = null;
+        this._mimetypes = [];
         const display = Gdk.Display.get_default();
         this._clipboard = Gtk.Clipboard.get_default(display);
 
@@ -133,14 +292,15 @@ const Clipboard = GObject.registerClass({
     }
 
     async _onOwnerChange() {
+        const generation = ++this._generation;
         try {
             if (this._clipboard instanceof Gtk.Clipboard)
-                await this._gtkUpdateText();
+                await this._gtkUpdateText(generation);
 
             else if (this._clipboard instanceof Gio.DBusProxy)
-                await this._proxyUpdateText();
+                await this._proxyUpdateText(generation);
         } catch (e) {
-            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 debug(e);
         }
     }
@@ -156,33 +316,55 @@ const Clipboard = GObject.registerClass({
     /*
      * Proxy Clipboard
      */
-    async _proxyUpdateText() {
-        let reply = await this._clipboard.call('GetMimetypes', null,
-            Gio.DBusCallFlags.NO_AUTO_START, -1, this._cancellable);
-        const mimetypes = reply.deepUnpack()[0];
+    async _proxyUpdateText(generation) {
+        const proxy = this._clipboard;
+        let remoteId = '';
+        let available = false;
+        try {
+            const reply = await this._call('GetOffer', null, proxy);
+            remoteId = reply.deepUnpack()[0];
+            available = true;
+        } catch {
+            // Older extensions have the text-only portal.
+            available = false;
+        }
+        if (generation !== this._generation || proxy !== this._clipboard)
+            return;
+        this._available = available;
+        if (remoteId)
+            return;
+        this._cancelRequests();
+        this._offer = null;
 
-        // Special case for a cleared clipboard
+        let reply = await this._call('GetMimetypes', null, proxy);
+        const mimetypes = reply.deepUnpack()[0];
+        if (generation !== this._generation || proxy !== this._clipboard)
+            return;
+        this._mimetypes = mimetypes;
+        this.emit('changed');
+
         if (mimetypes.length === 0)
             return this._applyUpdate('');
-
-        // Special case to ignore copied files
-        if (mimetypes.includes('text/uri-list'))
+        if (mimetypes.includes('text/uri-list') ||
+            !mimetypes.some(type => type.startsWith('text/plain') ||
+                type === 'UTF8_STRING' || type === 'STRING'))
             return;
 
-        reply = await this._clipboard.call('GetText', null,
-            Gio.DBusCallFlags.NO_AUTO_START, -1, this._cancellable);
-        const text = reply.deepUnpack()[0];
-
-        this._applyUpdate(text);
+        reply = await this._call('GetText', null, proxy);
+        if (generation === this._generation && proxy === this._clipboard)
+            this._applyUpdate(reply.deepUnpack()[0]);
     }
 
     /*
      * GtkClipboard
      */
-    async _gtkUpdateText() {
+    async _gtkUpdateText(generation) {
         const mimetypes = await new Promise((resolve, reject) => {
             this._clipboard.request_targets((clipboard, atoms) => resolve(atoms));
         });
+
+        if (generation !== this._generation)
+            return;
 
         // Special case for a cleared clipboard
         if (mimetypes.length === 0)
@@ -196,18 +378,32 @@ const Clipboard = GObject.registerClass({
             this._clipboard.request_text((clipboard, text) => resolve(text));
         });
 
-        this._applyUpdate(text);
+        if (generation === this._generation)
+            this._applyUpdate(text);
     }
 
     destroy() {
         if (this._cancellable.is_cancelled())
             return;
 
+        const offer = this._offer;
+        if (offer && this.available) {
+            this._clipboard.call('ClearOffer', new GLib.Variant('(s)', [offer.id]),
+                Gio.DBusCallFlags.NO_AUTO_START, 5000, null).catch(debug);
+        }
+        this._cancelRequests();
+        this._offer = null;
+        this._available = false;
+        this._generation++;
         this._cancellable.cancel();
+        if (this.signalHandler) {
+            Gio.DBus.session.signal_unsubscribe(this.signalHandler);
+            this.signalHandler = 0;
+        }
 
         if (this._clipboard && this._ownerChangeId > 0) {
             this._clipboard.disconnect(this._ownerChangeId);
-            this._ownerChangedId = 0;
+            this._ownerChangeId = 0;
         }
 
         if (this._nameWatcherId > 0) {
@@ -215,8 +411,6 @@ const Clipboard = GObject.registerClass({
             this._nameWatcherId = 0;
         }
 
-        if (!globalThis.HAVE_GNOME && this.signalHandler)
-            Gio.DBus.session.signal_unsubscribe(this.signalHandler);
     }
 });
 
