@@ -939,16 +939,11 @@ export const Channel = GObject.registerClass({
     }
 
     async download(packet, target, cancellable = null, onProgress = null) {
-        const address = Gio.InetSocketAddress.new_from_string(this.host,
-            packet.payloadTransferInfo.port);
-
-        const client = new Gio.SocketClient({enable_proxy: false});
-        const connection = await client.connect_async(address, cancellable)
-            .then(this._encryptClient.bind(this));
-
         // The fork's rich clipboard protocol requires exact lengths. Keep
         // legacy KDE Connect's tolerant splice behavior unchanged below.
         if (packet.type === 'gsconnect.clipboard.rich') {
+            let connection = null;
+            let rawConnection = null;
             const read = count => new Promise((resolve, reject) => {
                 connection.input_stream.read_bytes_async(count,
                     GLib.PRIORITY_DEFAULT, cancellable, (stream, result) => {
@@ -971,6 +966,11 @@ export const Channel = GObject.registerClass({
             });
             let failure = null;
             try {
+                const address = Gio.InetSocketAddress.new_from_string(this.host,
+                    packet.payloadTransferInfo.port);
+                const client = new Gio.SocketClient({enable_proxy: false});
+                rawConnection = await client.connect_async(address, cancellable);
+                connection = await this._encryptClient(rawConnection);
                 await copyExact(packet.payloadSize, read, bytes =>
                     target.write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancellable),
                 onProgress);
@@ -978,7 +978,8 @@ export const Channel = GObject.registerClass({
                 failure = error;
             } finally {
                 // Do not reuse the canceled transfer token for cleanup.
-                const results = await Promise.allSettled([close(target), close(connection)]);
+                const streams = [target, connection || rawConnection].filter(Boolean);
+                const results = await Promise.allSettled(streams.map(close));
                 if (!failure)
                     failure = results.find(result => result.status === 'rejected')?.reason;
             }
@@ -986,6 +987,13 @@ export const Channel = GObject.registerClass({
                 throw failure;
             return;
         }
+
+        const address = Gio.InetSocketAddress.new_from_string(this.host,
+            packet.payloadTransferInfo.port);
+
+        const client = new Gio.SocketClient({enable_proxy: false});
+        const connection = await client.connect_async(address, cancellable)
+            .then(this._encryptClient.bind(this));
 
         // Start the transfer
         const transferredSize = await target.splice_async(

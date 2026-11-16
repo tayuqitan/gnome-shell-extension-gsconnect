@@ -12,6 +12,7 @@ const ATTRS = 'standard::type,standard::size,standard::is-symlink,unix::uid,unix
 export class ClipboardCacheStorage {
     constructor(root, limit) {
         this.root = Gio.File.new_for_path(root);
+        this.failedRollbacks = new Set();
         this.uid = new Gio.Credentials().get_unix_user();
         this.rootIdentity = this._directory(this.root);
         // Restart recovery is deliberately conservative: every existing byte is
@@ -71,6 +72,31 @@ export class ClipboardCacheStorage {
         return total;
     }
 
+    _refresh() {
+        const total = this._size(this.root, 0);
+        let trackedActual = 0;
+        for (const item of this.ledger.objects.values()) {
+            if (!item.handle?.identity)
+                continue;
+            let actual = 0;
+            try {
+                if (this._directory(item.handle.directory, false) !== item.handle.identity)
+                    throw new Error('Cache transaction directory was replaced');
+                actual = this._size(item.handle.directory, 0);
+            } catch (error) {
+                if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                    throw error;
+            }
+            trackedActual += actual;
+            // Applications may append to exposed files. Never trust the original
+            // payload length for subsequent admission decisions.
+            if (item.state === 'complete')
+                item.size = Math.max(item.size, actual);
+        }
+        this.baseline = Math.max(0, total - trackedActual);
+        this.setLimit(this.limit);
+    }
+
     setLimit(limit) {
         if (!Number.isSafeInteger(limit) || limit < 0)
             throw new Error('Invalid cache disk quota');
@@ -79,6 +105,7 @@ export class ClipboardCacheStorage {
     }
 
     begin(files) {
+        this._refresh();
         if (!Array.isArray(files) || !files.length || files.length > 128 ||
             !files.every(file => typeof file.name === 'string' && file.name.length > 0 &&
                 file.name !== '.' && file.name !== '..' && file.name.length <= 255 &&
@@ -128,8 +155,37 @@ export class ClipboardCacheStorage {
         return transaction.handle.children.map(child => child.file.get_uri());
     }
 
-    rollback(transaction) {
-        return this.ledger.discard(transaction.token);
+    async rollback(transaction) {
+        try {
+            const removed = await this.ledger.discard(transaction.token);
+            this.failedRollbacks.delete(transaction);
+            return removed;
+        } catch (error) {
+            this.failedRollbacks.add(transaction);
+            throw error;
+        }
+    }
+
+    snapshot() {
+        this._refresh();
+        return {limit: this.limit, used: this.baseline + this.ledger.used,
+            retainedFromPreviousRuns: this.baseline,
+            failedBatches: this.failedRollbacks.size};
+    }
+
+    async retryFailedRollbacks() {
+        let removed = 0, failed = 0;
+        // Only transactions whose writers have already settled and whose prior
+        // rollback failed are eligible. Never scan other files for deletion.
+        for (const transaction of [...this.failedRollbacks]) {
+            try {
+                if (await this.rollback(transaction))
+                    removed++;
+            } catch {
+                failed++;
+            }
+        }
+        return {removed, failed};
     }
 
     _remove(handle) {
@@ -166,4 +222,9 @@ export function getClipboardCacheStorage(limit) {
         sharedStorage.setLimit(limit);
     }
     return sharedStorage;
+}
+
+/** Apply UI changes without creating directories or touching existing data. */
+export function setClipboardCacheLimit(limit) {
+    sharedStorage?.setLimit(limit);
 }

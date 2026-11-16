@@ -3,11 +3,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import GObject from 'gi://GObject';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
 import * as Components from '../components/index.js';
 import Plugin from '../plugin.js';
 import RichClipboard, {CAPABILITY} from '../utils/richClipboard.js';
 import ClipboardHistoryDialog from '../utils/clipboardHistoryDialog.js';
+import {getClipboardCacheStorage, setClipboardCacheLimit} from '../utils/clipboardCacheStorage.js';
 
 
 export const Metadata = {
@@ -219,6 +222,20 @@ const ClipboardPlugin = GObject.registerClass({
         if (!this._historyDialog || this._historyDialog.destroyed) {
             this._historyDialog = new ClipboardHistoryDialog(this._rich.history, {
                 peerName: this.device.name,
+                disk: {
+                    getLimit: () => Gio.Application.get_default().settings
+                        .get_value('clipboard-cache-max-bytes').deepUnpack(),
+                    setLimit: limit => {
+                        if (!Gio.Application.get_default().settings.set_value(
+                            'clipboard-cache-max-bytes', new GLib.Variant('t', limit)))
+                            throw new Error('磁盘配额设置未保存');
+                        setClipboardCacheLimit(limit);
+                    },
+                    inspect: () => getClipboardCacheStorage(Gio.Application.get_default().settings
+                        .get_value('clipboard-cache-max-bytes').deepUnpack()).snapshot(),
+                    cleanup: () => getClipboardCacheStorage(Gio.Application.get_default().settings
+                        .get_value('clipboard-cache-max-bytes').deepUnpack()).retryFailedRollbacks(),
+                },
                 onActivate: entry => this._rich.activateHistory(entry),
                 onLimits: ({maxItems, maxBytes}) => {
                     this.settings.set_uint('history-max-items', maxItems);

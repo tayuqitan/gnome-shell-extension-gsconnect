@@ -30,9 +30,17 @@ merge of later feature-branch fixes. It has NOT been validated across two deskto
   unexposed batch including earlier completed files. Failed cleanup retains its
   reservation. Source files are never passed to the removal backend.
 * Successful URIs are pinned permanently. Clearing history cannot delete them.
-  Reaching quota refuses new transfers. There is currently NO automatic reclamation
-  of completed data, no cleanup UI, and no retention expiry. This favors safe
-  existing pastes over indefinite operation without user maintenance.
+  Reaching quota refuses new transfers. There is NO automatic reclamation of
+  completed data or retention expiry. The history dialog offers global GiB quota
+  settings, a usage check, and retry of previously failed rollback batches only.
+  The retry button never deletes completed/exposed data or restart remnants.
+* Every batch admission and usage check rescans disk to account for external
+  appends to exposed files. This is an admission allowance, NOT a kernel quota:
+  applications may still grow their existing files after a check. Quota cannot
+  prevent arbitrary writes by the same Unix user.
+* Rich transfer network cleanup now covers connection and encryption failures,
+  not only copying. Target streams are closed before download rejection settles.
+  Source paths and successful cached URIs are never deleted by this cleanup.
 
 ## Remaining requirements for broader lifecycle support
 
@@ -86,3 +94,9 @@ GIO transaction creation/deletion tests. This creates only a fresh test director
 inside the current working directory, never the actual clipboard cache.
 `testClipboardCacheIntegration.mjs` exercises the transfer/rollback bridge with
 mocks, including waiting for cancelled writers. No desktop changes are performed.
+
+## Branch integration status
+
+This remains the independent `fix/cache-quota` development branch. It has NOT
+been merged into the main feature branch, installed or tested on two desktops.
+The quota UI is tested with mocked GTK callbacks, not a rendered desktop window.
