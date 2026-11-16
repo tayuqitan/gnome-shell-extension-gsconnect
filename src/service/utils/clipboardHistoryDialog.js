@@ -3,10 +3,11 @@
 
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
+import ClipboardCacheControls from './clipboardCacheControls.js';
 
 /** History UI deliberately does not preview copied text or images. */
 export default class ClipboardHistoryDialog {
-    constructor(history, {peerName = '', onActivate, onLimits} = {}) {
+    constructor(history, {peerName = '', onActivate, onLimits, disk} = {}) {
         this.history = history;
         this.onActivate = onActivate;
         this.window = new Gtk.Dialog({
@@ -33,7 +34,7 @@ export default class ClipboardHistoryDialog {
         this.count = Gtk.SpinButton.new_with_range(0, 1000, 1);
         this.count.set_value(history.maxItems);
         controls.add(this.count);
-        controls.add(new Gtk.Label({label: '容量 MiB'}));
+        controls.add(new Gtk.Label({label: '历史容量 MiB'}));
         this.capacity = Gtk.SpinButton.new_with_range(0, 1024, 1);
         this.capacity.set_value(history.maxBytes / 1048576);
         controls.add(this.capacity);
@@ -48,6 +49,8 @@ export default class ClipboardHistoryDialog {
         });
         controls.add(apply);
         content.add(controls);
+        if (disk)
+            content.add(new ClipboardCacheControls(disk).widget);
         const clear = new Gtk.Button({label: '清空历史'});
         clear.connect('clicked', () => history.clear());
         content.add(clear);

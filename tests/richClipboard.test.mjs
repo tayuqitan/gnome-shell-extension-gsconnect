@@ -31,7 +31,7 @@ async function rig() {
             transfers.push(transfer); return transfer;
         }};
     const mocks = {
-        Gio: {ThemedIcon: class { constructor(properties) { this.properties = properties; } }, IOErrorEnum: {CANCELLED: 19}, Cancellable: class {
+        Gio: {Application: {get_default: () => ({settings: {get_value: () => ({deepUnpack: () => 10737418240})}})}, ThemedIcon: class { constructor(properties) { this.properties = properties; } }, IOErrorEnum: {CANCELLED: 19}, Cancellable: class {
             constructor() { this.handlers = new Map(); this.serial = 0; this.canceled = false; }
             is_cancelled() { return this.canceled; }
             connect(fn) { this.handlers.set(++this.serial, fn); if (this.canceled) fn(); return this.serial; }
@@ -49,11 +49,22 @@ async function rig() {
     };
     globalThis.__richClipboardTestMocks = mocks;
     globalThis.__clipboardHistory = ClipboardHistory;
+    // Disk/GIO behavior is covered by the real storage suite; keep protocol
+    // fixtures isolated while exercising the actual fetchFiles integration.
+    globalThis.__clipboardCacheStorage = {
+        begin(files) { return {handle: {children: files.map((file, index) => ({
+            file: mocks.Gio.File.new_for_path(`/cache/test/${index}/${file.name}`),
+        }))}}; },
+        complete(transaction) { return transaction.handle.children.map(child => child.file.get_uri()); },
+        async rollback() {},
+    };
     globalThis.debug = () => {};
     globalThis._ = text => text;
     const transformed = source.replace("import Gio from 'gi://Gio';", 'const Gio = globalThis.__richClipboardTestMocks.Gio;')
         .replace("import GLib from 'gi://GLib';", 'const GLib = globalThis.__richClipboardTestMocks.GLib;')
-        .replace("import ClipboardHistory from './clipboardHistory.js';", 'const ClipboardHistory = globalThis.__clipboardHistory;');
+        .replace("import ClipboardHistory from './clipboardHistory.js';", 'const ClipboardHistory = globalThis.__clipboardHistory;')
+        .replace("import {getClipboardCacheStorage} from './clipboardCacheStorage.js';",
+            'const getClipboardCacheStorage = () => globalThis.__clipboardCacheStorage;');
     const {default: RichClipboard} = await import(`data:text/javascript;base64,${Buffer.from(transformed + `\n// ${++sequence}`).toString('base64')}`);
     const helper = new RichClipboard({device, settings}, clipboard);
     helper.remoteReady = true; // Ready handshake already completed in this fixture.

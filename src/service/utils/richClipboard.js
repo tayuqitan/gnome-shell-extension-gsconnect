@@ -4,6 +4,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import ClipboardHistory from './clipboardHistory.js';
+import {getClipboardCacheStorage} from './clipboardCacheStorage.js';
 
 // Deliberately private to this fork. Never send these packets to legacy peers.
 export const CAPABILITY = 'gsconnect.clipboard.rich';
@@ -44,6 +45,7 @@ export default class RichClipboard {
         this.device = plugin.device;
         this.clipboard = clipboard;
         this.pending = new Map();
+        this.cacheWriters = new Map();
         this.local = null;
         this.remote = null;
         this.closed = false;
@@ -483,27 +485,40 @@ export default class RichClipboard {
             completed: 0, count: remote.files.length, base: 0};
         remote.progress = progress;
         this.notifyProgress(progress, _('Transferring'), null, true);
+        let storage, transaction;
         try {
-            const root = GLib.build_filenamev([GLib.get_user_cache_dir(), 'gsconnect',
-                'clipboard', GLib.uuid_string_random()]);
-            const uris = [];
+            const settings = Gio.Application.get_default().settings;
+            const limit = settings.get_value('clipboard-cache-max-bytes').deepUnpack();
+            storage = getClipboardCacheStorage(limit);
+            transaction = storage.begin(remote.files);
             for (let index = 0; index < remote.files.length; index++) {
                 if (cancellable?.is_cancelled())
                     throw new Error('Clipboard request cancelled');
-                const directory = GLib.build_filenamev([root, String(index)]);
-                GLib.mkdir_with_parents(directory, 0o700);
-                const path = GLib.build_filenamev([directory, remote.files[index].name]);
-                const file = Gio.File.new_for_path(path);
+                const file = transaction.handle.children[index].file;
                 await this.request(remote, {index}, file, cancellable);
-                uris.push(file.get_uri());
                 progress.base += remote.files[index].size;
                 progress.written = progress.base;
                 progress.completed++;
                 this.notifyProgress(progress, _('Transferring'), null, true);
             }
+            if (cancellable?.is_cancelled())
+                throw new Error('Clipboard request cancelled');
+            const uris = storage.complete(transaction);
             this.notifyProgress(progress, _('Completed'), null, true);
             return uris;
         } catch (error) {
+            const rollback = transaction || error.cacheTransaction;
+            if (rollback) {
+                try {
+                    // Cancellation can reject request() before transfer streams
+                    // settle. Never remove transaction paths while writers live.
+                    await Promise.allSettled(rollback.handle.children.map(child =>
+                        this.cacheWriters.get(child.file.get_uri())).filter(Boolean));
+                    await storage.rollback(rollback);
+                } catch (cleanupError) {
+                    debug(cleanupError); // Retain quota on failed cleanup.
+                }
+            }
             const cancelled = cancellable?.is_cancelled() ||
                 error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
             this.notifyProgress(progress, cancelled ? _('Cancelled') : _('Failed'), error, true);
@@ -626,7 +641,16 @@ export default class RichClipboard {
                 transfer.addFile(packet, pending.file);
             else
                 transfer.addStream(packet, stream);
-            await transfer.start(pending.cancellable);
+            const writing = transfer.start(pending.cancellable);
+            const fileKey = pending.file?.get_uri();
+            if (fileKey)
+                this.cacheWriters.set(fileKey, writing);
+            try {
+                await writing;
+            } finally {
+                if (fileKey && this.cacheWriters.get(fileKey) === writing)
+                    this.cacheWriters.delete(fileKey);
+            }
             const value = pending.file ? null : stream.steal_as_bytes().get_data();
             if (value && pending.detail.mime && !pending.remote.sensitive)
                 this.history.attachValue(pending.remote.id, pending.detail.mime, value);
