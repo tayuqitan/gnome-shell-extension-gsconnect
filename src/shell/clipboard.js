@@ -10,6 +10,7 @@ import Meta from 'gi://Meta';
 
 import * as DBus from '../service/utils/dbus.js';
 import {ClipboardPasteGate} from './clipboardPasteGate.js';
+import * as ClipboardNative from './clipboardNative.js';
 
 
 /*
@@ -89,129 +90,6 @@ const TEXT_MIMETYPES = [
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 
-const RemoteSelectionSource = GObject.registerClass({
-    GTypeName: 'GSConnectRemoteSelectionSource',
-}, class RemoteSelectionSource extends Meta.SelectionSource {
-    _init(id, mimetypes, request, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
-        cancel = null, guardRead = null) {
-        super._init();
-        if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 86400)
-            throw new Error('Invalid clipboard deadline');
-        this._timeoutSeconds = timeoutSeconds;
-        this.offerId = id;
-        this._mimetypes = mimetypes;
-        this._request = request;
-        this._cancel = cancel;
-        this._guardRead = guardRead;
-        this._pending = new Map();
-        this._closed = false;
-    }
-
-    vfunc_get_mimetypes() {
-        return this._mimetypes.slice();
-    }
-
-    vfunc_read_async(mimetype, cancellable, callback) {
-        const task = Gio.Task.new(this, cancellable, callback);
-        if (this._closed || !this._mimetypes.includes(mimetype)) {
-            task.return_error(new Gio.IOErrorEnum({
-                code: Gio.IOErrorEnum.NOT_FOUND,
-                message: 'Clipboard offer is no longer available',
-            }));
-            return;
-        }
-        if (cancellable?.is_cancelled()) {
-            task.return_error_if_cancelled();
-            return;
-        }
-        if (this._guardRead && !this._guardRead(this, mimetype)) {
-            task.return_error(new Gio.IOErrorEnum({
-                code: Gio.IOErrorEnum.PERMISSION_DENIED,
-                message: 'Remote files require a local Ctrl+V gesture',
-            }));
-            return;
-        }
-        if (this._pending.size >= 32) {
-            task.return_error(new Gio.IOErrorEnum({
-                code: Gio.IOErrorEnum.BUSY,
-                message: 'Too many clipboard requests',
-            }));
-            return;
-        }
-        const requestId = GLib.uuid_string_random();
-        const pending = {task, cancellable, cancelId: 0, timeoutId: 0};
-        this._pending.set(requestId, pending);
-        pending.timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
-            this._timeoutSeconds, () => {
-                pending.timeoutId = 0;
-                this.resolve(requestId, null, 'Clipboard transfer timed out');
-                return GLib.SOURCE_REMOVE;
-            });
-        if (cancellable) {
-            // Gio.Cancellable.disconnect() cannot run inside its callback.
-            pending.cancelId = cancellable.connect(() => {
-                this._cancelPending(requestId);
-                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                    this.resolve(requestId, null, 'Clipboard request cancelled');
-                    return GLib.SOURCE_REMOVE;
-                });
-            });
-        }
-        this._request(this.offerId, requestId, mimetype);
-    }
-
-    vfunc_read_finish(result) {
-        result.propagate_boolean();
-        const stream = result._clipboardStream;
-        delete result._clipboardStream;
-        return stream;
-    }
-
-    _cancelPending(requestId) {
-        const pending = this._pending.get(requestId);
-        if (pending && !pending.cancelNotified) {
-            pending.cancelNotified = true;
-            this._cancel?.(this.offerId, requestId);
-        }
-    }
-
-    resolve(requestId, value, error) {
-        const pending = this._pending.get(requestId);
-        if (!pending)
-            return;
-        if (error)
-            this._cancelPending(requestId);
-        this._pending.delete(requestId);
-        if (pending.timeoutId)
-            GLib.source_remove(pending.timeoutId);
-        if (pending.cancelId)
-            pending.cancellable.disconnect(pending.cancelId);
-        if (!error && (!value || value.length > MAX_VALUE_BYTES))
-            error = 'Clipboard representation exceeds the 16 MiB limit';
-        if (error) {
-            pending.task.return_error(new Gio.IOErrorEnum({
-                code: Gio.IOErrorEnum.FAILED,
-                message: error.slice(0, 512),
-            }));
-        } else {
-            // GTask's pointer API is not introspectable. Keep the stream on
-            // its GObject wrapper, and let our read_finish return it to Mutter.
-            pending.task._clipboardStream = Gio.MemoryInputStream.new_from_bytes(
-                new GLib.Bytes(value));
-            pending.task.return_boolean(true);
-        }
-    }
-
-    close() {
-        this._closed = true;
-        for (const requestId of this._pending.keys())
-            this.resolve(requestId, null, 'Clipboard ownership changed');
-    }
-
-    vfunc_deactivated() {
-        this.close();
-    }
-});
 
 
 /* GSConnectClipboardPortal:
@@ -240,6 +118,7 @@ export const Clipboard = GObject.registerClass({
     _init(params = {}) {
         super._init();
 
+        this._destroyed = false;
         this._experimentalPasteGate = Boolean(params.experimentalPasteGate);
         this._pasteGate = null;
         this._transferring = false;
@@ -270,13 +149,14 @@ export const Clipboard = GObject.registerClass({
     setPasteGateEnabled(enabled) {
         this._pasteGate?.destroy();
         this._pasteGate = null;
-        if (enabled && this._experimentalPasteGate)
+        if (enabled && !this._destroyed && this._experimentalPasteGate &&
+            ClipboardNative.isAvailable())
             this._pasteGate = new ClipboardPasteGate(() => this._remoteSource);
     }
 
     _onOwnerChanged(selection, type, source) {
         /* We're only interested in the standard clipboard */
-        if (type !== Meta.SelectionType.SELECTION_CLIPBOARD)
+        if (this._destroyed || type !== Meta.SelectionType.SELECTION_CLIPBOARD)
             return;
 
         if (this._remoteSource && source !== this._remoteSource) {
@@ -300,7 +180,8 @@ export const Clipboard = GObject.registerClass({
          */
         this._ownerIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._ownerIdleId = 0;
-            this.emit('OwnerChange');
+            if (!this._destroyed)
+                this.emit('OwnerChange');
             this._transferring = false;
 
             return GLib.SOURCE_REMOVE;
@@ -308,6 +189,8 @@ export const Clipboard = GObject.registerClass({
     }
 
     _onBusAcquired(connection, name) {
+        if (this._destroyed)
+            return;
         try {
             this._dbus.export(connection, DBUS_PATH);
         } catch (e) {
@@ -469,28 +352,40 @@ export const Clipboard = GObject.registerClass({
                 message: 'Invalid clipboard offer',
             });
         }
+        if (!ClipboardNative.isAvailable())
+            throw new Error('Native rich clipboard bridge is unavailable; text only');
+        // Construct before revoking the current offer, so validation failures
+        // cannot leave a closed source as the selection owner.
+        const source = ClipboardNative.createSource(id, [...new Set(mimetypes)], timeoutSeconds);
+        source.offerId = id;
+        source.connect('request', (_source, requestId, mimetype) => {
+            if (this._experimentalPasteGate &&
+                (mimetype === 'text/uri-list' || mimetype === 'x-special/gnome-copied-files') &&
+                !(this._pasteGate?.allows(source) ?? false)) {
+                source.resolve(requestId, null, 'Remote files require a local Ctrl+V gesture');
+                return;
+            }
+            this.emit('ValueRequested', id, requestId, mimetype);
+        });
+        source.connect('cancel-requested', (_source, requestId) =>
+            this.emit('CancelRequested', id, requestId));
         this._pasteGate?.invalidate();
         if (this._remoteSource)
             this._remoteSource.close();
-        this._remoteSource = new RemoteSelectionSource(id, [...new Set(mimetypes)],
-            (...args) => this.emit('ValueRequested', ...args), timeoutSeconds,
-            (...args) => this.emit('CancelRequested', ...args),
-            this._experimentalPasteGate ? (source, mimetype) => {
-                if (mimetype !== 'text/uri-list' && mimetype !== 'x-special/gnome-copied-files')
-                    return true;
-                return this._pasteGate?.allows(source) ?? false;
-            } : null);
+        this._remoteSource = source;
         this._selection.set_owner(Meta.SelectionType.SELECTION_CLIPBOARD,
             this._remoteSource);
     }
 
     GetOffer() {
+        if (!ClipboardNative.isAvailable())
+            throw new Error('Native rich clipboard bridge is unavailable; text only');
         return this._remoteSource?.offerId ?? '';
     }
 
     Resolve(id, requestId, value, error) {
         if (id === this._remoteSource?.offerId)
-            this._remoteSource.resolve(requestId, value, error);
+            this._remoteSource.resolve(requestId, error ? null : new GLib.Bytes(value), error);
     }
 
     ClearOffer(id) {
@@ -504,17 +399,22 @@ export const Clipboard = GObject.registerClass({
     }
 
     destroy() {
+        if (this._destroyed)
+            return;
+        this._destroyed = true;
         this.setPasteGateEnabled(false);
-        if (this._ownerIdleId) {
-            GLib.source_remove(this._ownerIdleId);
-            this._ownerIdleId = 0;
-        }
-        if (this._remoteSource)
-            this.ClearOffer(this._remoteSource.offerId);
+        // Stop owner notifications before unset_owner can emit synchronously.
         if (this._selection && this._ownerChangedId > 0) {
             this._selection.disconnect(this._ownerChangedId);
             this._ownerChangedId = 0;
         }
+        if (this._ownerIdleId) {
+            GLib.source_remove(this._ownerIdleId);
+            this._ownerIdleId = 0;
+        }
+        this._transferring = false;
+        if (this._remoteSource)
+            this.ClearOffer(this._remoteSource.offerId);
 
         if (this._nameId > 0) {
             Gio.bus_unown_name(this._nameId);

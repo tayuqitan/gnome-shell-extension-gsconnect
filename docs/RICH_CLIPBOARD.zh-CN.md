@@ -5,7 +5,7 @@
 ## 状态与适用范围
 
 这是面向两台 GNOME **Wayland** 桌面的实验实现，不是已在 RHEL 10.3 双机验收的发行版。
-两端均需安装此 fork 的同一版本、配对，并允许剪贴板收发。X11、未升级的 Shell
+两端均需安装此 fork 的同一版本、与各自 Mutter ABI 匹配的原生剪贴板桥、配对，并允许剪贴板收发。X11、未升级的 Shell
 桥、原版 KDE Connect 客户端仍使用原有文本同步。请先确认 `echo $XDG_SESSION_TYPE`
 输出 `wayland`，并记录 `gnome-shell --version`。当前仓库声明支持 GNOME Shell 46–51；
 不能仅凭发行版名称判断兼容性，也不要绕过版本检查安装不匹配的版本。
@@ -13,6 +13,16 @@
 本 fork 为满足双机需求，明确偏离 CONTRIBUTING.md 的“不新增协议”上游贡献规范。
 新增私有能力 `gsconnect.clipboard.rich`，仅当双方宣告支持且本地新桥可用时使用；
 不改变 `kdeconnect.clipboard` 及其他 KDE Connect 公共包语义。
+
+### 运行时 ABI 前置条件
+
+实机 GJS 1.80 已确认不能通过 JavaScript 重写带 GAsyncReadyCallback 的
+`Meta.SelectionSource.read_async` vfunc。此前纯 JS 实现无法加载，Node mock 不能验证这类 GI ABI。
+现在由 `native-clipboard/` 的 C GObject 子类处理异步读取、GTask 与输入流，JS 只处理普通信号。
+构建说明和真实 GJS smoke test 见该目录 README。桥必须按目标 Mutter 的开发包与 GI namespace 编译，
+不能复制其他发行版/ABI 的二进制或手工猜测 C 结构布局。
+桥未安装或加载失败时明确保留原有文本同步，不宣称富格式可用；日志给出原生桥缺失原因。
+这只是故障隔离，不能算图片/文件功能已修好。须通过真实 GJS 原生桥测试后再进行双机验收。
 
 ## 当前行为
 
@@ -79,7 +89,9 @@ gsettings set org.gnome.Shell.Extensions.GSConnect experimental-clipboard-paste-
 
 ## 结构
 
-- `src/shell/clipboard.js`：Meta.SelectionSource 惰性源；D-Bus Offer、GetOffer、
+- `native-clipboard/`：原生 Meta.SelectionSource 子类、GIR/typelib、真实 GJS ABI 测试。
+- `src/shell/clipboardNative.js`：可选原生桥加载与 ABI 失败隔离。
+- `src/shell/clipboard.js`：惰性源与 Shell 的适配；D-Bus Offer、GetOffer、
   ValueRequested、CancelRequested、Resolve、ClearOffer；所有请求异步，不阻塞 Shell 等待网络。
 - `src/service/components/clipboard.js`：桥连接、generation、所有权跟踪、
   二进制读取、远端 offer 回环抑制、超时与取消。Shell 读取者主动取消通过
@@ -102,6 +114,9 @@ SELinux 或系统安全设置来掩盖失败。
 
 ```sh
 npm install
+
+# 富格式打包前，按 native-clipboard/README.md 构建匹配 ABI 的桥并放入 src/native。
+# 未包含桥的包只保留文本能力。
 meson setup _build
 meson test -C _build --suite gsconnect:data --suite gsconnect:lint --print-errorlogs
 ninja -C _build make-zip

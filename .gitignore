@@ -8,3 +8,5 @@ webextension/*.zip
 /node_modules
 /package-lock.json
 
+
+/src/native/

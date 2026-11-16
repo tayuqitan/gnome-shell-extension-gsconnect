@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: GSConnect Developers https://github.com/GSConnect
+# SPDX-License-Identifier: GPL-2.0-or-later
+option('mutter_api', type: 'string', value: '17', description: 'Installed libmutter/Meta API number (e.g. 17 for GNOME 49)')
+option('gjs_smoke_test', type: 'boolean', value: false, description: 'Run optional GJS introspection smoke test')
+
+option('native_timeout_test', type: 'boolean', value: false, description: 'Run the real 60-second request deadline test')
