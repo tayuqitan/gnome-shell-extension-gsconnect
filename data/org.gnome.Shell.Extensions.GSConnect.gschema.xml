@@ -29,6 +29,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </key>
 
     <!-- Service Settings -->
+    <key name="clipboard-cache-max-bytes" type="t">
+      <range min="0" max="1099511627776"/>
+      <default>10737418240</default>
+      <summary>Global clipboard v2 disk cache allowance</summary>
+      <description>Defaults to 10 GiB. Includes all peers and conservatively accounted existing v2 data. Zero blocks new downloads. Exposed file URIs are never automatically deleted; old legacy cache is not removed or included.</description>
+    </key>
     <key name="id" type="s">
       <default>""</default>
     </key>

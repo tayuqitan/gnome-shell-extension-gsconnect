@@ -1,10 +1,41 @@
 # Clipboard cache ledger integration contract
 
-This module is a tested accounting primitive, NOT a deployed disk quota fix.
-It does not touch the filesystem and is deliberately not wired into transfers
-until the owned-storage backend and restart accounting are implemented.
+The ledger now has a GIO storage backend and is connected to `fetchFiles`.
+This is an independently developed experimental branch based on 300fad2, not a
+merge of later feature-branch fixes. It has NOT been validated across two desktops.
 
-## Required backend
+## Implemented policy
+
+* Global `clipboard-cache-max-bytes` GSettings key: default 10 GiB, range 0–1 TiB.
+  Read on each new batch; lowering it blocks new allocations without deleting
+  existing files. The history MiB control remains a separate memory/history limit.
+* All peers in the normal single GSConnect service process share one reservation
+  ledger. The GApplication single-instance service is required; this is not a
+  cross-process storage library and must not be independently instantiated by
+  multiple writers on the same root.
+* New data lives under `gsconnect/clipboard-cache-v2` in the user's cache directory.
+  Restart scans and charges all existing v2 data, including incomplete batches;
+  it never guesses which persisted files are safe to delete. Legacy `clipboard`
+  cache is neither deleted nor included in this new quota.
+* Accounting charges logical file size with a 4 KiB minimum and 4 KiB per folder.
+  This is a conservative allocation estimate, not an exact filesystem block
+  limit. Filesystem free space is checked as well. Other programs can still fill
+  the disk, and filesystem allocation overhead can differ.
+* Private transaction directories, bounded filename validation and no-follow
+  ownership/type checks protect source paths. Only tracked files in the fresh
+  transaction can be rolled back, never arbitrary clipboard URI paths. Directory
+  identities are checked. This does not claim protection against a malicious
+  process running as the same Unix user racing filesystem operations.
+* Transfer failures and cancellations await tracked writers, then remove the
+  unexposed batch including earlier completed files. Failed cleanup retains its
+  reservation. Source files are never passed to the removal backend.
+* Successful URIs are pinned permanently. Clearing history cannot delete them.
+  Reaching quota refuses new transfers. There is currently NO automatic reclamation
+  of completed data, no cleanup UI, and no retention expiry. This favors safe
+  existing pastes over indefinite operation without user maintenance.
+
+## Remaining requirements for broader lifecycle support
+
 
 * One ledger for all peers, not one per device. The limit is a global disk limit,
   separate from history snapshot bytes. Include existing managed committed data
@@ -50,4 +81,8 @@ be disabled by these settings. Existing cached URI lifetimes must be visible.
 Tests cover concurrent reservation, disk-space overbooking, invalid sizes,
 transaction rollback handles, independent readers, exposed URI protection,
 limit reduction, cleanup failure, size overrun, and deletion/retain races.
-No desktop changes or filesystem deletion tests are performed by this suite.
+Run `gjs -m installed-tests/gjs/testClipboardCacheStorage.js` for isolated real
+GIO transaction creation/deletion tests. This creates only a fresh test directory
+inside the current working directory, never the actual clipboard cache.
+`testClipboardCacheIntegration.mjs` exercises the transfer/rollback bridge with
+mocks, including waiting for cancelled writers. No desktop changes are performed.
