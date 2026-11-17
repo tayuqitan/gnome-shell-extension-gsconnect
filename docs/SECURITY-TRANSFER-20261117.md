@@ -224,3 +224,32 @@ repository-local core file remained in the follow-up inspection. No core dump or
 private-key contents were inspected. Static lifecycle improvements and an opt-in
 guard do not count as a demonstrated fix for the runtime crash. Production code
 and the integrity-fixed package are unchanged by this diagnostic.
+
+### Authentication side effects without TLS or real pairing
+
+`installed-tests/node/testAuthenticationSideEffects.mjs` extracts the unchanged
+production authentication method and cancellation helper into a VM containing
+only mocked settings, device and handshake objects. Its 24 cases cover both
+existing-device and settings-factory branches, transfer/channel cancellation
+before or during a pending handshake, cancellation despite a late successful
+handshake, matching/empty/mismatching certificate states, parse/comparison
+errors, and handshake failures. Canceled authentication never reaches settings
+reads/construction, certificate parsing, unpair or resets. This is simulated I/O,
+not new TLS acceptance evidence.
+
+`installed-tests/gjs/testAuthenticationSettings.js ABSOLUTE_PACKAGE_DIRECTORY`
+adds eight real-GJS cases using real Gio.Cancellable and explicitly constructed
+Gio memory-settings backends. Every Settings.new_full receives that backend;
+the schema source is the supplied package directory, with no system fallback.
+The production method text and real cancellation helper run against simulated
+handshake/certificate adapters. Separate random paths and a neighboring sentinel
+prove that resets remain confined to the intended memory settings.
+
+Cancellation leaves those memory values intact with no authentication-side
+settings access. A simulated mismatch in the no-device branch performs the
+actual two memory-settings resets; the existing-device branch only records a
+fake unpair call and does not claim to perform real unpairing. The preexisting
+certificate-mismatch policy is deliberately unchanged. There are no native TLS
+handshakes, certificates, default dconf access, real devices, network operations
+or production configuration changes in these tests. The unstable TLS diagnostic
+remains disabled and was not rerun.
