@@ -85,8 +85,10 @@ function adapter(length, options = {}) {
     }};
     const Gio = {InetSocketAddress: {new_from_string: () => ({})},
         SocketClient: class { async connect_async() { return connection; } }};
-    const download = new Function('Gio', 'GLib', 'copyExact',
-        `return async function(packet,target,cancellable=null,onProgress=null) {${downloadBody}}`)(Gio, {PRIORITY_DEFAULT: 0}, copyExact);
+    const linkCancellables = () => ({cancellable: {connect() { return 0; }, set_error_if_cancelled() {}}, dispose() {}});
+    const closeTransferStreams = streams => Promise.allSettled([...new Set(streams.filter(Boolean))].map(stream => new Promise((resolve, reject) => stream.close_async(0, null, (source, result) => { try { source.close_finish(result); resolve(); } catch (e) { reject(e); } }))));
+    const download = new Function('Gio', 'GLib', 'copyExact', 'linkCancellables', 'closeTransferSocket', 'closeTransferStreams',
+        `return async function(packet,target,cancellable=null,onProgress=null) {${downloadBody}}`)(Gio, {PRIORITY_DEFAULT: 0}, copyExact, linkCancellables, () => {}, closeTransferStreams);
     return {closed, writes, run: (size, onProgress = null) => download.call({host: 'localhost', _encryptClient: value => value},
         {type: 'gsconnect.clipboard.rich', payloadSize: size, payloadTransferInfo: {port: 1}}, target, {}, onProgress)};
 }
@@ -147,7 +149,7 @@ test('LAN adapter forwards progress through exact copy', async () => {
 test('Core transfer forwards optional progress and cancellation to download', async () => {
     const core = await readFile(new URL('../src/service/core.js', import.meta.url), 'utf8');
     const body = core.split('    async start(cancellable = null) {')[1]
-        .split('\n    cancel()')[0].replace(/\n    }\s*$/, '');
+        .split('\n    /**\n     * Retire a transfer')[0].replace(/\n    }\s*$/, '');
     const events = [];
     const token = {cancel() { events.push('cancelled'); }};
     const progress = () => {};

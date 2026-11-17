@@ -10,9 +10,10 @@ class Proxy { async call(method, params) { this.calls.push([method, params?.valu
 class Variant { constructor(type, value) { this.value = value; } deepUnpack() { return this.value; } }
 const context = { Uint8Array, Promise, Error, debug() {},
  GObject: {Object: Base, registerClass: (_, C) => C, ParamSpec:{string(){}}, ParamFlags:{READWRITE:1}},
- Gio: {DBusProxy:Proxy, Cancellable: class {cancel(){this.canceled=true;} is_cancelled(){return !!this.canceled;}},bus_watch_name(){return 1;}, BusType:{SESSION:1},BusNameWatcherFlags:{NONE:0},DBusCallFlags:{NO_AUTO_START:0}, IOErrorEnum:{CANCELLED:1}},
+ Gio: {DBusProxy:Proxy, Cancellable: class {cancel(){this.canceled=true;} is_cancelled(){return !!this.canceled;} connect(){return 0;} disconnect(){}},bus_watch_name(){return 1;}, BusType:{SESSION:1},BusNameWatcherFlags:{NONE:0},DBusCallFlags:{NO_AUTO_START:0}, IOErrorEnum:{CANCELLED:1}},
  Gtk:{Clipboard:class{}}, Gdk:{}, GLib:{Variant,PRIORITY_DEFAULT:0,timeout_add_seconds(p,t,fn){timers.set(++seq,fn);return seq;},source_remove(id){timers.delete(id);},SOURCE_REMOVE:0},};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync('src/service/utils/transferCancellation.js','utf8').replace(/^import .*;$/gm,'').replace(/export /g,''), context);
 let code=fs.readFileSync('src/service/components/clipboard.js','utf8').replace(/^import .*;$/gm,'').replace('export default Clipboard;', 'globalThis.Clipboard = Clipboard;');
 vm.runInContext(code,context);
 function fresh(){const c = new context.Clipboard();c.events=[];c._init();c._clipboard=new Proxy();c._clipboard.calls=[];return c;}

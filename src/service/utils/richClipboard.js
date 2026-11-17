@@ -545,6 +545,14 @@ export default class RichClipboard {
         transfer.clipboardOfferId = offer.id;
         this.serving.set(body.request, transfer);
         let fileStream = null;
+        let started = false;
+        const cancellable = transfer.cancellable;
+        let deadline = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+            this.timeoutSeconds, () => {
+                deadline = 0;
+                transfer.cancel();
+                return GLib.SOURCE_REMOVE;
+            });
         try {
             const packet = {type: CAPABILITY, body: {version: 1, op: 'value',
                 id: offer.id, request: body.request}};
@@ -553,15 +561,15 @@ export default class RichClipboard {
                 const item = offer.files[body.index];
                 const info = await item.file.query_info_async(
                     'standard::size,time::modified,standard::type,standard::is-symlink',
-                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, null);
+                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, cancellable);
                 if (info.get_size() !== item.size ||
                     info.get_attribute_uint64('time::modified') !== item.modified ||
                 info.get_is_symlink() || info.get_file_type() !== Gio.FileType.REGULAR)
                     throw new Error('Source file changed; copy it again');
-                const stream = await item.file.read_async(GLib.PRIORITY_DEFAULT, null);
+                const stream = await item.file.read_async(GLib.PRIORITY_DEFAULT, cancellable);
                 fileStream = stream;
                 const opened = await stream.query_info_async('standard::size,time::modified,id::file',
-                    GLib.PRIORITY_DEFAULT, null);
+                    GLib.PRIORITY_DEFAULT, cancellable);
                 if (!item.identity || opened.get_attribute_string('id::file') !== item.identity ||
                 opened.get_size() !== item.size ||
                 opened.get_attribute_uint64('time::modified') !== item.modified) {
@@ -576,17 +584,20 @@ export default class RichClipboard {
                 if (retained() && archive.values.has(body.mime))
                     bytes = archive.values.get(body.mime);
                 else if (current())
-                    bytes = await this.clipboard.readValue(body.mime);
+                    bytes = await this.clipboard.readValue(body.mime, cancellable);
                 if (!bytes || bytes.length > MAX_VALUE || (!current() && !retained()))
                     throw new Error('Clipboard value changed or is too large');
                 transfer.addStream(packet, Gio.MemoryInputStream.new_from_bytes(
                     new GLib.Bytes(bytes)), bytes.length);
             }
-            if (this.closed || (!current() && !retained()) ||
+            if (cancellable.is_cancelled() || this.closed || (!current() && !retained()) ||
             !this.plugin.settings.get_boolean('send-content'))
                 throw new Error('Clipboard lease expired');
+            started = true;
             await transfer.start();
         } finally {
+            if (deadline)
+                GLib.source_remove(deadline);
             if (fileStream) {
                 try {
                     fileStream.close(null);
@@ -594,6 +605,8 @@ export default class RichClipboard {
                     debug(error);
                 }
             }
+            if (!started)
+                transfer.abandon();
             this.serving.delete(body.request);
         }
     }

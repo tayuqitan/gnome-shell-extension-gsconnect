@@ -10,6 +10,7 @@ import Config from '../../config.js';
 import * as Core from '../core.js';
 import Device from '../device.js';
 import {copyExact} from '../utils/exactTransfer.js';
+import {linkCancellables, closeTransferSocket, closeTransferStreams} from '../utils/transferCancellation.js';
 
 // Retain compatibility with GLib < 2.80, which lacks GioUnix
 let GioUnix;
@@ -707,15 +708,22 @@ export const Channel = GObject.registerClass({
      * Authenticate a TLS connection.
      *
      * @param {Gio.TlsConnection} connection - A TLS connection
+     * @param {Gio.Cancellable|null} cancellable - Transfer cancellation
      * @returns {Promise} A promise for the operation
      */
-    async _authenticate(connection) {
+    async _authenticate(connection, cancellable = null) {
         // Standard TLS Handshake
         connection.validation_flags = Gio.TlsCertificateFlags.EXPIRED;
         connection.authentication_mode = Gio.TlsAuthenticationMode.REQUIRED;
 
-        await connection.handshake_async(GLib.PRIORITY_DEFAULT,
-            this.cancellable);
+        const lifetime = linkCancellables(this.cancellable, cancellable);
+        try {
+            await connection.handshake_async(GLib.PRIORITY_DEFAULT,
+                lifetime.cancellable);
+            lifetime.cancellable.set_error_if_cancelled();
+        } finally {
+            lifetime.dispose();
+        }
 
         // Get a settings object for the device
         let settings;
@@ -779,25 +787,27 @@ export const Channel = GObject.registerClass({
      * Wrap the connection in Gio.TlsClientConnection and initiate handshake
      *
      * @param {Gio.TcpConnection} connection - The unauthenticated connection
+     * @param {Gio.Cancellable|null} cancellable - Transfer cancellation
      * @returns {Gio.TlsClientConnection} The authenticated connection
      */
-    _encryptClient(connection) {
+    _encryptClient(connection, cancellable = null) {
         _configureSocket(connection);
 
         connection = Gio.TlsClientConnection.new(connection,
             connection.socket.remote_address);
         connection.set_certificate(this.certificate);
 
-        return this._authenticate(connection);
+        return this._authenticate(connection, cancellable);
     }
 
     /**
      * Wrap the connection in Gio.TlsServerConnection and initiate handshake
      *
      * @param {Gio.TcpConnection} connection - The unauthenticated connection
+     * @param {Gio.Cancellable|null} cancellable - Transfer cancellation
      * @returns {Gio.TlsServerConnection} The authenticated connection
      */
-    _encryptServer(connection) {
+    _encryptServer(connection, cancellable = null) {
         _configureSocket(connection);
 
         connection = Gio.TlsServerConnection.new(connection, this.certificate);
@@ -808,7 +818,7 @@ export const Channel = GObject.registerClass({
             return true;
         });
 
-        return this._authenticate(connection);
+        return this._authenticate(connection, cancellable);
     }
 
     async _exchangeIdentities() {
@@ -942,8 +952,11 @@ export const Channel = GObject.registerClass({
         // The fork's rich clipboard protocol requires exact lengths. Keep
         // legacy KDE Connect's tolerant splice behavior unchanged below.
         if (packet.type === 'gsconnect.clipboard.rich') {
+            const lifetime = linkCancellables(this.cancellable, cancellable);
+            cancellable = lifetime.cancellable;
             let connection = null;
             let rawConnection = null;
+            const cancelId = cancellable.connect(() => closeTransferSocket(rawConnection));
             const read = count => new Promise((resolve, reject) => {
                 connection.input_stream.read_bytes_async(count,
                     GLib.PRIORITY_DEFAULT, cancellable, (stream, result) => {
@@ -954,34 +967,29 @@ export const Channel = GObject.registerClass({
                         }
                     });
             });
-            const close = stream => new Promise((resolve, reject) => {
-                stream.close_async(GLib.PRIORITY_DEFAULT, null, (source, result) => {
-                    try {
-                        source.close_finish(result);
-                        resolve();
-                    } catch (error) {
-                        reject(error);
-                    }
-                });
-            });
             let failure = null;
             try {
+                cancellable.set_error_if_cancelled();
                 const address = Gio.InetSocketAddress.new_from_string(this.host,
                     packet.payloadTransferInfo.port);
                 const client = new Gio.SocketClient({enable_proxy: false});
                 rawConnection = await client.connect_async(address, cancellable);
-                connection = await this._encryptClient(rawConnection);
+                cancellable.set_error_if_cancelled();
+                connection = await this._encryptClient(rawConnection, cancellable);
                 await copyExact(packet.payloadSize, read, bytes =>
                     target.write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancellable),
                 onProgress);
             } catch (error) {
                 failure = error;
+                closeTransferSocket(rawConnection);
             } finally {
-                // Do not reuse the canceled transfer token for cleanup.
-                const streams = [target, connection || rawConnection].filter(Boolean);
-                const results = await Promise.allSettled(streams.map(close));
+                const results = await closeTransferStreams(
+                    [target, connection || rawConnection], rawConnection);
                 if (!failure)
                     failure = results.find(result => result.status === 'rejected')?.reason;
+                if (cancelId)
+                    cancellable.disconnect(cancelId);
+                lifetime.dispose();
             }
             if (failure)
                 throw failure;
@@ -1020,6 +1028,8 @@ export const Channel = GObject.registerClass({
     }
 
     async upload(packet, source, size, cancellable = null) {
+        if (packet.type === 'gsconnect.clipboard.rich')
+            return this._uploadRich(packet, source, size, cancellable);
         // Start listening on the first available port between 1739-1764
         const listener = new Gio.SocketListener();
         let port = TRANSFER_MIN;
@@ -1068,8 +1078,79 @@ export const Channel = GObject.registerClass({
         }
     }
 
+    async _uploadRich(packet, source, size, cancellable) {
+        const lifetime = linkCancellables(this.cancellable, cancellable);
+        cancellable = lifetime.cancellable;
+        const listener = new Gio.SocketListener();
+        let rawConnection = null;
+        let connection = null;
+        let accepting = null;
+        let sending = null;
+        let failure = null;
+        const cancelId = cancellable.connect(() => {
+            listener.close();
+            closeTransferSocket(rawConnection);
+        });
+        try {
+            cancellable.set_error_if_cancelled();
+            let port = TRANSFER_MIN;
+            for (; port <= TRANSFER_MAX; port++) {
+                try {
+                    listener.add_inet_port(port, null);
+                    break;
+                } catch (error) {
+                    if (port === TRANSFER_MAX)
+                        throw error;
+                }
+            }
+            accepting = (async () => {
+                [rawConnection] = await listener.accept_async(cancellable);
+                cancellable.set_error_if_cancelled();
+                listener.close();
+                connection = await this._encryptServer(rawConnection, cancellable);
+                return connection;
+            })();
+            // Observe accept rejection even if packet preparation throws.
+            accepting.catch(() => {});
+            packet.body.payloadHash = this.checksum;
+            packet.payloadSize = size;
+            packet.payloadTransferInfo = {port};
+            sending = this.sendPacket(new Core.Packet(packet), cancellable);
+            await Promise.all([sending, accepting]);
+            const transferred = await connection.output_stream.splice_async(source,
+                Gio.OutputStreamSpliceFlags.CLOSE_SOURCE | Gio.OutputStreamSpliceFlags.CLOSE_TARGET,
+                GLib.PRIORITY_DEFAULT, cancellable);
+            cancellable.set_error_if_cancelled();
+            if (transferred !== size) {
+                throw new Gio.IOErrorEnum({code: Gio.IOErrorEnum.PARTIAL_INPUT,
+                    message: 'Transfer incomplete'});
+            }
+        } catch (error) {
+            failure = error;
+        } finally {
+            // Cancel only this operation; never cancel the channel or caller.
+            listener.close();
+            if (failure)
+                cancellable.cancel();
+            await Promise.allSettled([accepting, sending].filter(Boolean));
+            const results = await closeTransferStreams(
+                [source, connection || rawConnection], rawConnection);
+            if (!failure)
+                failure = results.find(result => result.status === 'rejected')?.reason;
+            if (cancelId)
+                cancellable.disconnect(cancelId);
+            lifetime.dispose();
+        }
+        if (failure)
+            throw failure;
+    }
+
     async rejectTransfer(packet) {
         try {
+            // Reject rich data without opening peer-selected connections.
+            // Rich senders have a deadline; legacy behavior is unchanged.
+            if (packet?.type === 'gsconnect.clipboard.rich')
+                return;
             if (!packet || !packet.hasPayload())
                 return;
 

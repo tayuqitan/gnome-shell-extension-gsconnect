@@ -501,6 +501,10 @@ export const Transfer = GObject.registerClass({
         this.onProgress = null;
     }
 
+    get cancellable() {
+        return this._cancellable;
+    }
+
     get channel() {
         if (this._channel === undefined)
             this._channel = null;
@@ -649,6 +653,9 @@ export const Transfer = GObject.registerClass({
      * @param {Gio.Cancellable} [cancellable] - A cancellable
      */
     async start(cancellable = null) {
+        if (this._started || this.completed)
+            throw new Error('Transfer already started or completed');
+        this._started = true;
         let error = null;
 
         try {
@@ -691,6 +698,21 @@ export const Transfer = GObject.registerClass({
 
         if (error !== null)
             throw error;
+    }
+
+    /**
+     * Retire a transfer whose preparation has settled without starting I/O.
+     * The caller must close any prepared streams before abandoning it.
+     */
+    abandon() {
+        if (this._started)
+            throw new Error('Cannot abandon a started transfer');
+        if (this.completed)
+            return;
+        this.cancel();
+        this._items = [];
+        this._completed = true;
+        this.notify('completed');
     }
 
     cancel() {

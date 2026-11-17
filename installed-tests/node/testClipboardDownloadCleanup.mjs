@@ -19,7 +19,10 @@ function fixture(mode) {
     }, close_finish() {}});
     const raw = stream('raw');
     const target = stream('target');
-    const scope = {GLib: {PRIORITY_DEFAULT: 0}, Promise,
+    const token = {connect: () => 1, disconnect() {}, set_error_if_cancelled() {}};
+    const scope = {linkCancellables: () => ({cancellable: token, dispose() {}}),
+        closeTransferSocket() {}, closeTransferStreams: async streams => Promise.allSettled(
+            streams.map(item => new Promise(resolve => item.close_async(0, null, resolve)))), GLib: {PRIORITY_DEFAULT: 0}, Promise,
         Gio: {InetSocketAddress: {new_from_string() {}}, SocketClient: class {
             async connect_async() {
                 if (mode === 'connect') throw Error('connect failed');

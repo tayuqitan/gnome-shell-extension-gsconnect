@@ -6,6 +6,7 @@ import Gdk from 'gi://Gdk';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
+import {linkCancellables} from '../utils/transferCancellation.js';
 import GObject from 'gi://GObject';
 
 
@@ -76,13 +77,20 @@ const Clipboard = GObject.registerClass({
             300000, this._cancellable);
     }
 
-    async readValue(mimetype) {
+    async readValue(mimetype, cancellable = null) {
         if (!this.available || !this._mimetypes.includes(mimetype))
             throw new Error('Clipboard format is unavailable');
 
         const generation = this._generation;
-        const reply = await this._call('GetValue',
-            new GLib.Variant('(s)', [mimetype]));
+        const lifetime = linkCancellables(this._cancellable, cancellable);
+        let reply;
+        try {
+            reply = await this._clipboard.call('GetValue',
+                new GLib.Variant('(s)', [mimetype]), Gio.DBusCallFlags.NO_AUTO_START,
+                300000, lifetime.cancellable);
+        } finally {
+            lifetime.dispose();
+        }
         if (generation !== this._generation || this._offer !== null)
             throw new Error('Clipboard changed while reading');
 

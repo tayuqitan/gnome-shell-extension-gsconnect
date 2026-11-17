@@ -25,9 +25,9 @@ async function rig() {
     const device = {connected: true, settings: {get_strv: () => [capability]},
         sendPacket(packet) { sent.push(packet); }, rejectTransfer(packet) { rejected.push(packet); },
         createTransfer() {
-            const transfer = {started: false, canceled: false, addFile(packet, file) { this.item = {packet, file}; },
+            const transfer = {cancellable: new mocks.Gio.Cancellable(), started: false, canceled: false, abandon() { this.abandoned = true; }, addFile(packet, file) { this.item = {packet, file}; },
                 addStream(packet, stream, size) { this.item = {packet, stream, size}; },
-                async start() { this.started = true; const total = this.item.packet.payloadSize ?? this.item.size ?? 0; this.onProgress?.(total, total); }, cancel() { this.canceled = true; }};
+                async start() { this.started = true; const total = this.item.packet.payloadSize ?? this.item.size ?? 0; this.onProgress?.(total, total); }, cancel() { this.canceled = true; this.cancellable.cancel(); }};
             transfers.push(transfer); return transfer;
         }};
     const mocks = {
@@ -568,3 +568,97 @@ test('persisted empty history cannot fall back to requesting the source', async 
     await assert.rejects(r.helper.activateHistory(entry), /持久化记录没有可用字节快照/);
     assert.equal(r.sent.filter(p => p.body.op === 'request').length, 0);
 });
+
+test('eight stalled senders time out, settle and release admission for a ninth request', async () => {
+    const r = await rig();
+    await r.helper.publish();
+    const create = r.device.createTransfer.bind(r.device);
+    r.device.createTransfer = () => {
+        const transfer = create();
+        transfer.start = () => new Promise((resolve, reject) => {
+            transfer.started = true;
+            transfer.cancellable.connect(() => reject(Error('cancelled by total deadline')));
+        });
+        return transfer;
+    };
+    const sends = Array.from({length: 8}, (_, i) =>
+        r.helper.serve({id: r.helper.local.id, request: `deadline-${i}`, mime: 'image/png'}));
+    const outcomes = Promise.allSettled(sends);
+    await Promise.resolve();
+    assert.equal(r.helper.serving.size, 8);
+    assert.equal(r.timers.size, 8);
+    await assert.rejects(r.helper.serve({id: r.helper.local.id, request: 'ninth', mime: 'image/png'}), /Too many/);
+    for (const [id, callback] of [...r.timers]) { r.timers.delete(id); callback(); }
+    assert.ok((await outcomes).every(result => result.status === 'rejected'));
+    assert.equal(r.helper.serving.size, 0);
+    assert.ok(r.transfers.every(transfer => transfer.cancellable.is_cancelled()));
+    r.device.createTransfer = create;
+    await r.helper.serve({id: r.helper.local.id, request: 'after-deadline', mime: 'image/png'});
+    assert.equal(r.helper.serving.size, 0);
+    assert.equal(r.timers.size, 0);
+});
+
+test('send deadline cancels a pre-read and abandons the never-started transfer', async () => {
+    const r = await rig(); await r.helper.publish();
+    r.helper.history.getLocalLease(r.helper.local.id).values.clear();
+    let token;
+    r.clipboard.readValue = (_mime, cancellable) => new Promise((resolve, reject) => {
+        token = cancellable;
+        cancellable.connect(() => reject(Error('pre-read cancelled')));
+    });
+    const sending = r.helper.serve({id: r.helper.local.id, request: 'pre-read', mime: 'image/png'});
+    const rejection = assert.rejects(sending, /pre-read cancelled/);
+    for (const [id, callback] of [...r.timers]) { r.timers.delete(id); callback(); }
+    await rejection;
+    assert.ok(token.is_cancelled());
+    assert.equal(r.transfers[0].started, false);
+    assert.equal(r.transfers[0].abandoned, true);
+    assert.equal(r.helper.serving.size, 0);
+});
+
+test('cancel during preparation cannot start a transfer even if a provider returns late', async () => {
+    const r = await rig(); await r.helper.publish();
+    r.helper.history.getLocalLease(r.helper.local.id).values.clear();
+    let finish;
+    r.clipboard.readValue = () => new Promise(resolve => { finish = resolve; });
+    const sending = r.helper.serve({id: r.helper.local.id, request: 'late-pre-read', mime: 'image/png'});
+    const rejection = assert.rejects(sending, /expired/);
+    for (const [id, callback] of [...r.timers]) { r.timers.delete(id); callback(); }
+    finish(new Uint8Array([1]));
+    await rejection;
+    assert.equal(r.transfers[0].started, false);
+    assert.equal(r.transfers[0].abandoned, true);
+    assert.equal(r.helper.serving.size, 0);
+});
+
+for (const phase of ['stat', 'open', 'opened-info']) {
+    test(`file preparation ${phase} uses deadline token and retires canceled transfer`, async () => {
+        const r = await rig();
+        let reached = false, streamClosed = false;
+        const info = {get_size: () => 3, get_attribute_uint64: () => 10,
+            get_attribute_string: () => 'identity', get_is_symlink: () => false,
+            get_file_type: () => 1};
+        const step = (name, token, result) => {
+            assert.equal(token, r.transfers[0].cancellable);
+            if (name !== phase) return Promise.resolve(result);
+            reached = true;
+            return new Promise((resolve, reject) => token.connect(() => reject(Error('preparation canceled'))));
+        };
+        const stream = {close() { streamClosed = true; },
+            query_info_async(_attributes, _priority, token) { return step('opened-info', token, info); }};
+        const file = {query_info_async(_attributes, _flags, _priority, token) { return step('stat', token, info); },
+            read_async(_priority, token) { return step('open', token, stream); }};
+        r.helper.local = {id: 'file-offer', generation: 1,
+            files: [{file, size: 3, modified: 10, identity: 'identity'}], types: ['text/uri-list']};
+        const serving = r.helper.serve({id: 'file-offer', request: 'file-request', index: 0});
+        const rejected = assert.rejects(serving, /preparation canceled/);
+        for (let i = 0; i < 50 && !reached; i++) await Promise.resolve();
+        assert.ok(reached);
+        for (const [id, callback] of [...r.timers]) { r.timers.delete(id); callback(); }
+        await rejected;
+        assert.equal(r.transfers[0].started, false);
+        assert.equal(r.transfers[0].abandoned, true);
+        assert.equal(r.helper.serving.size, 0);
+        assert.equal(streamClosed, phase === 'opened-info');
+    });
+}
