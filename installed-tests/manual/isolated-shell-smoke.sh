@@ -9,7 +9,7 @@ ZIP=$1
 [[ $ZIP == /* ]] || { echo 'ZIP path must be absolute.' >&2; exit 1; }
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CLIENT="$SCRIPT_DIR/../gjs/testShellClipboardBridge.js"
-EXPECTED=d445fa3927ec9c43562d2f4cd1d8174634273ed7aa41f0906971dee0b05182cb
+EXPECTED=ddca70b4991a86d9bb527577dfee703137ad0c5c53055976c151c3ffc5187570
 UUID=gsconnect@andyholmes.github.io
 for cmd in bash python3 sha256sum mktemp env dbus-run-session gnome-shell gsettings glib-compile-schemas gdbus timeout tee cut grep mkdir cat chmod seq sleep dirname cp gjs; do
     command -v "$cmd" >/dev/null || { printf '缺少依赖：%s\n' "$cmd" >&2; exit 1; }

@@ -8,6 +8,7 @@ import GObject from 'gi://GObject';
 
 import Device from './device.js';
 import plugins from './plugins/index.js';
+import {sendPacketBytes} from './utils/packetBytes.js';
 
 
 /**
@@ -250,14 +251,10 @@ export const Channel = GObject.registerClass({
      *
      * @param {Packet} packet - The packet to send
      * @param {Gio.Cancellable} [cancellable] - A cancellable
-     * @returns {Promise<boolean>} %true if successful
+     * @returns {Promise<number[]>} Written bytes in a GJS compatibility array
      */
     sendPacket(packet, cancellable = null) {
-        if (cancellable === null)
-            cancellable = this.cancellable;
-
-        return this.output_stream.write_all_async(packet.serialize(),
-            GLib.PRIORITY_DEFAULT, cancellable);
+        return sendPacketBytes(this, packet, cancellable);
     }
 
     /**

@@ -419,3 +419,46 @@ cancellation, GIO error matching, output ownership and native pending behavior.
 LAN's initial plaintext identity write is a separate path and is not covered
 by this candidate integration. No production integration has been made, and
 the earlier crash's root cause remains undetermined.
+
+### Minimal production Core packet writer integration
+
+Core.sendPacket now delegates to `service/utils/packetBytes.js`, the reviewed
+single-splice owned-byte implementation. Its test-candidate entry point is an
+alias to the production helper, preventing behavioral drift. Serialization
+still occurs once; success remains the local GJS-compatible `[byteCount]`;
+explicit/default cancellation and native PENDING are preserved. Only the owned
+memory source is closed. Invalid completion counts are GIO PARTIAL_INPUT errors.
+No Device queue, LAN plaintext identity or other output path was modified.
+
+Caller regression extracts the actual Device/Core/Packet methods, the LAN
+identity-exchange method and production helper with mocked GIO boundaries.
+Eight cases pass, covering FIFO/queued-caller early return, GIO cancellation and
+failure unlock/next-call resumption, count-error matching and direct callers.
+LAN upload Promise.all relationships and unchanged plaintext identity writing
+are static contracts, not execution of full upload methods. One explicit TODO
+reproduces an existing unfixed issue: a normal JavaScript Error in Device's
+catch hits its unguarded `e.matches`, leaving the queue lock set. This TODO is
+not a passing test. A separate fix should guard error matching and guarantee
+unlock in finally; remaining queued-packet retry policy requires its own review.
+
+A newly built, uninstalled ZIP includes the production helper through Meson's
+existing source-directory installation rule. Its SHA256 is:
+`ddca70b4991a86d9bb527577dfee703137ad0c5c53055976c151c3ffc5187570`.
+The new `testPackagedPacketWriter.js` first compares packaged Core/helper hashes
+with the checkout, then executes the extracted packaged Core method and imports
+the packaged helper against real memory/private-file streams. All nineteen
+cases pass, including exact 2 MiB readback, cancellation, PENDING, source cleanup,
+closed-output recovery, sequence ordering and packaged Packet serialization.
+Its first harness draft mixed top-level await with a nested MainLoop and hit
+the watchdog; using top-level await consistently resolved that harness issue.
+This was not a demonstrated production writer failure.
+
+ZIP/native manifest checks, source equality, no Python-cache leakage, strict
+schema compilation, native loader/smoke and three Meson data checks pass.
+The first standalone native invocation lacked the Meta typelib search path;
+with the actual /usr/lib64/mutter-17 path explicitly supplied, loader and smoke
+both passed. Independent review reran the packaged nineteen cases successfully. This
+is not full Core object initialization, a new-package TLS run, desktop or
+paired-device acceptance. Earlier candidate TLS evidence remains distinct.
+No extension was installed and no real pairings were accessed. The earlier
+crash's root cause remains undetermined; this change is not claimed to identify it.

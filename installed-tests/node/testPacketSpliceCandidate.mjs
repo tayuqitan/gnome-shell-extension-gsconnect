@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
-const candidate = readFileSync(new URL('../fixtures/packetSpliceCandidate.js', import.meta.url), 'utf8');
+const candidate = readFileSync(new URL('../../src/service/utils/packetBytes.js', import.meta.url), 'utf8');
+const wrapper = readFileSync(new URL('../fixtures/packetSpliceCandidate.js', import.meta.url), 'utf8');
+assert.match(wrapper, /export \{sendPacketBytes as sendPacketCandidate\} from '\.\.\/\.\.\/src\/service\/utils\/packetBytes\.js';/);
 /**
  * Model one native splice operation and its partial internal writes.
  * @param {object} options - Controlled native outcomes
@@ -60,8 +62,8 @@ function fixture(options = {}) {
         splice_finish(result) { if (result.error) throw result.error; return result.count; },
     };
     const channel = {output_stream: target, cancellable: token};
-    return {send: packet => scope.sendPacketCandidate(channel, packet),
-        explicit: (packet, cancel) => scope.sendPacketCandidate(channel, packet, cancel),
+    return {send: packet => scope.sendPacketBytes(channel, packet),
+        explicit: (packet, cancel) => scope.sendPacketBytes(channel, packet, cancel),
         channel, token, target, inputs, calls, data, options, IOError, release: () => release()};
 }
 const packet = text => ({serialize: () => text});
