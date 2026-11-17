@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// TEST-ONLY new package entry; locally exercised; not full service validation.
+// Separate entry point: never calls the older packet writer.
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import System from 'system';
+import {loadPackagedCoreSender} from '../fixtures/packagedCoreSender.js';
+let Packet;
+let sendPackaged;
+
+if (ARGV.length !== 5 || ARGV[0] !== '--run-reviewed-packaged-core-tls-semantics')
+    throw Error('Test-only fixture requires explicit opt-in, package, cert directory, port and mode');
+const [, packagePath, certPath, portText, mode] = ARGV;
+if (!GLib.path_is_absolute(packagePath) || !GLib.path_is_absolute(certPath) ||
+    !/^[0-9]+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535 ||
+    !['concurrent', 'pre-cancel', 'closed', 'blocked-cancel'].includes(mode))
+    throw Error('Invalid fixture arguments');
+let raw = null;
+let tls = null;
+let pendingWrite = null;
+let pendingOther = null;
+let cancelTimer = 0;
+const operation = new Gio.Cancellable();
+const writeToken = new Gio.Cancellable();
+const loop = new GLib.MainLoop(null, false);
+let exitCode = 0;
+const watchdog = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 15, () => {
+    try {
+        raw?.socket.close();
+    } catch {
+        // Process exit still reclaims descriptors.
+    }
+    try {
+        printerr('FAIL client watchdog');
+    } finally {
+        System.exit(1);
+    }
+    return GLib.SOURCE_REMOVE;
+});
+/** Run one client with fixture certificates and a native peer process. */
+async function run() {
+    ({Packet, send: sendPackaged} = await loadPackagedCoreSender(packagePath));
+    print('STAGE CONNECT_START');
+    const client = new Gio.SocketClient({enable_proxy: false, timeout: 10});
+    raw = await new Promise((resolve, reject) => {
+        client.connect_to_host_async('127.0.0.1', Number(portText), operation, (source, result) => {
+            try {
+                resolve(source.connect_to_host_finish(result));
+            } catch (error) {
+                reject(error);
+            }
+        });
+    });
+    print('STAGE CONNECTED');
+    tls = Gio.TlsClientConnection.new(raw,
+        new Gio.NetworkAddress({hostname: 'localhost', port: Number(portText)}));
+    tls.database = Gio.TlsFileDatabase.new(`${certPath}/ca.pem`);
+    tls.set_certificate(Gio.TlsCertificate.new_from_files(`${certPath}/client.pem`, `${certPath}/client.key`));
+    await new Promise((resolve, reject) => {
+        tls.handshake_async(GLib.PRIORITY_DEFAULT, operation, (source, result) => {
+            try {
+                source.handshake_finish(result);
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        });
+    });
+    const expectedServer = Gio.TlsCertificate.new_from_file(`${certPath}/server.pem`);
+    if (!expectedServer.is_same(tls.peer_certificate))
+        throw Error('Fixture server certificate mismatch');
+    print('STAGE TLS_VERIFIED');
+    const token = writeToken;
+    const channel = {output_stream: tls.output_stream, cancellable: token};
+    const packet = new Packet();
+    packet.id = 0;
+    packet.type = 'test.isolated.packet';
+    packet.body = {text: ['concurrent', 'blocked-cancel'].includes(mode)
+        ? 'x'.repeat(2 * 1024 * 1024 - 1024) : 'fixture only'};
+    if (mode === 'blocked-cancel') {
+        raw.socket.set_option(1, 7, 4096);
+        const GioUnix = (await import('gi://GioUnix')).default;
+        const input = new GioUnix.InputStream({fd: 0, close_fd: false});
+        const command = [];
+        try {
+            while (command.length < 3) {
+                const bytes = await new Promise((resolve, reject) => {
+                    input.read_bytes_async(3 - command.length, GLib.PRIORITY_DEFAULT,
+                        operation, (source, result) => {
+                            try {
+                                resolve(new Uint8Array(
+                                    source.read_bytes_finish(result).get_data()));
+                            } catch (error) {
+                                reject(error);
+                            }
+                        });
+                });
+                if (!bytes.length)
+                    throw Error('Controller closed before GO');
+                command.push(...bytes);
+            }
+            if (String.fromCharCode(...command) !== 'GO\n')
+                throw Error('Invalid controller permission');
+        } finally {
+            input.close(null);
+        }
+        print('STAGE PEER_PAUSED');
+    }
+    if (mode === 'pre-cancel')
+        token.cancel();
+    if (mode === 'closed') {
+        print('STAGE CLOSE_START');
+        await closeTls();
+        print('STAGE CLOSED');
+    }
+    print('STAGE WRITE_START');
+    pendingWrite = sendPackaged(channel, packet).then(
+        value => ({value}), error => ({error}));
+    const expected = new TextEncoder().encode(`${JSON.stringify(packet)}\n`);
+    if (expected.length > 2 * 1024 * 1024)
+        throw Error('Payload bound exceeded');
+    // Only fixture bytes, never keys; used for interrupted-prefix proof.
+    GLib.file_set_contents(`${certPath}/expected.bin`, expected);
+    let second = null;
+    if (mode === 'concurrent') {
+        second = sendPackaged(channel, Object.assign(new Packet(), {id: 0, type: 'fixture.second', body: {text: 'second packet'}})).then(
+            value => ({value}), error => ({error}));
+        pendingOther = second;
+    }
+    let settled = false;
+    pendingWrite.then(() => {
+        settled = true;
+    });
+    let proof = false;
+    let proofError = null;
+    if (mode === 'blocked-cancel') {
+        cancelTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            cancelTimer = 0;
+            try {
+                proof = !settled &&
+                    !(raw.socket.condition_check(GLib.IOCondition.OUT) & GLib.IOCondition.OUT);
+            } catch (error) {
+                proofError = error;
+            } finally {
+                token.cancel();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+    const result = await pendingWrite;
+    if (proofError)
+        throw proofError;
+    if (second) {
+        const rejected = await second;
+        if (!rejected.error?.matches(Gio.io_error_quark(), Gio.IOErrorEnum.PENDING))
+            throw Error('Second operation was not native PENDING');
+        if (result.error || token.is_cancelled())
+            throw Error('First operation failed or caller token changed');
+        print('STAGE SECOND_PENDING');
+    } else {
+        const code = mode === 'closed' ? Gio.IOErrorEnum.CLOSED : Gio.IOErrorEnum.CANCELLED;
+        if (!result.error?.matches(Gio.io_error_quark(), code))
+            throw Error('Expected native failure not observed');
+        if (mode === 'closed' && token.is_cancelled())
+            throw Error('Closed operation changed caller token');
+        if (mode === 'blocked-cancel' && !proof)
+            throw Error('Pending/non-writable proof missing');
+        print(mode === 'closed' ? 'STAGE EXPECTED_CLOSED' : 'STAGE EXPECTED_CANCELLED');
+    }
+    print('STAGE WRITE_SETTLED');
+    if (mode === 'blocked-cancel') {
+        raw.socket.close();
+        print('STAGE FORCED_CLOSED');
+        print(`CANCELLED ${expected.length} ${GLib.compute_checksum_for_data(GLib.ChecksumType.SHA256, expected)}`);
+        return;
+    }
+    if (mode !== 'closed') {
+        print('STAGE CLOSE_START');
+        await closeTls();
+        print('STAGE CLOSED');
+    }
+    const wanted = mode === 'concurrent' ? expected : new Uint8Array();
+    print(`EXPECT ${wanted.length} ${GLib.compute_checksum_for_data(GLib.ChecksumType.SHA256, wanted)}`);
+}
+
+/** Close only after all writes settled, requiring real TLS close completion. */
+async function closeTls() {
+    await new Promise((resolve, reject) => {
+        tls.close_async(GLib.PRIORITY_DEFAULT, new Gio.Cancellable(), (source, result) => {
+            try {
+                source.close_finish(result);
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        });
+    });
+}
+
+run().catch(async error => {
+    operation.cancel();
+    writeToken.cancel();
+    try {
+        raw?.socket.close();
+    } catch {
+        // Already closed; still wait for the owned writer callback.
+    }
+    await Promise.allSettled([pendingWrite, pendingOther].filter(Boolean));
+    printerr(`FAIL client domain=${error.domain ?? 0} code=${error.code ?? 0}`);
+    exitCode = 1;
+}).finally(() => {
+    try {
+        raw?.socket.close();
+    } catch {
+        // Already closed after successful graceful shutdown.
+    }
+    if (cancelTimer)
+        GLib.source_remove(cancelTimer);
+    GLib.source_remove(watchdog);
+    loop.quit();
+});
+loop.run();
+System.exit(exitCode);

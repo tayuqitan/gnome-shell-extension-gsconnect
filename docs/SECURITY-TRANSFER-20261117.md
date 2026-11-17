@@ -491,3 +491,37 @@ compilation and packaged native loader/smoke pass again. The actual Device
 method is tested with mocked GIO boundaries, not a real connected Device or
 full service initialization. There is no new network, desktop or paired-device
 acceptance, and no formal installation was changed.
+
+### Latest ZIP Core-method transport verification
+
+This follow-up tests actual methods from ZIP `f3cf22d2...bc321fe5`, not the
+checkout candidate alias. Each new Python entry point verifies the full archive
+SHA256 and compares the extracted Core/helper bytes with the ZIP members before
+launch. The shared GJS adapter independently pins both module hashes, extracts
+only unchanged Core.sendPacket and Packet.serialize, and imports the packaged
+packetBytes helper. Every send, including the overlapping second send, goes
+through that extracted Core method with a real serialized Packet. It does not
+import or initialize the complete Core class, Device, backend or daemon.
+
+After independent static review, one fail-fast execution passed all twelve:
+
+- Plain TCP, five cases: small, Unicode, approximately 2 MiB, second-send PENDING
+  with first packet intact, and blocked native cancellation. Complete cases
+  matched length/every byte/SHA256 through actual EOF. The canceled case drained
+  16,384 correct prefix bytes to TCP EOF, not a successful full packet.
+- Strict-auth native-peer TLS, three cases: small, Unicode and approximately
+  2 MiB, all with complete EXPECT/RESULT length/hash and real close-notify EOF.
+- TLS semantics, four cases: concurrent PENDING with intact first packet,
+  pre-canceled CANCELLED and closed-output CLOSED with zero-byte clean EOF,
+  and the authenticated PAUSED/GO/DRAIN blocked-cancel protocol. The last case
+  verified native CANCELLED and the permitted truncated prefix/hash with EOF=0;
+  it is not a complete TLS transfer.
+
+These new entry points retain dedicated disposable CA/leaf authentication,
+loopback-only endpoints, bounded payloads, explicit opt-in, process watchdogs
+and owned-resource cleanup. No fixture credential directories or owned child
+processes remained. Three additional offline contract tests verify method-path
+and hash gates. This upgrades transport evidence for this package's extracted
+Core methods/helpers only. Full service startup, Device integration with real
+peers, plaintext identity negotiation, desktop and two-machine acceptance are
+still untested. No formal extension was installed and no pairings were touched.
