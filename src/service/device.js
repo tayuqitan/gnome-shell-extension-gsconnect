@@ -457,6 +457,7 @@ const Device = GObject.registerClass({
      * @param {object} packet - An object of packet data...
      */
     async sendPacket(packet) {
+        let ownsOutputLock = false;
         try {
             if (!this.connected)
                 return;
@@ -470,6 +471,7 @@ const Device = GObject.registerClass({
                 return;
 
             this._outputLock = true;
+            ownsOutputLock = true;
             let next;
 
             while ((next = this._outputQueue.shift())) {
@@ -477,12 +479,20 @@ const Device = GObject.registerClass({
                 debug(next, this.name);
             }
 
-            this._outputLock = false;
         } catch (e) {
-            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+            let cancelled = false;
+            try {
+                cancelled = typeof e?.matches === 'function' &&
+                    e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
+            } catch {
+                // Foreign errors may expose a throwing matches getter/method.
+            }
+            if (!cancelled)
                 debug(e, this.name);
-
-            this._outputLock = false;
+        } finally {
+            // An early-returning concurrent caller must not unlock the owner.
+            if (ownsOutputLock)
+                this._outputLock = false;
         }
     }
 

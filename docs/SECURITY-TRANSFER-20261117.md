@@ -462,3 +462,32 @@ is not full Core object initialization, a new-package TLS run, desktop or
 paired-device acceptance. Earlier candidate TLS evidence remains distinct.
 No extension was installed and no real pairings were accessed. The earlier
 crash's root cause remains undetermined; this change is not claimed to identify it.
+
+### Separate Device error-unlock fix
+
+The previously recorded TODO was reproduced before this separate change and
+is now a real passing regression, not removed or hidden. Device.sendPacket
+tracks whether this invocation acquired the output lock and releases it in
+finally only for that owner. Concurrent callers that merely enqueue and return,
+or fail before acquiring ownership, cannot unlock another active sender.
+Error matching tolerates ordinary JavaScript errors, null/undefined/string
+throws and foreign throwing matches getters/methods. Native CANCELLED remains
+quiet; other errors still reach the existing logger. If the logger itself
+throws, that rejection propagates but finally still releases the owned lock.
+
+The existing queue policy is intentionally unchanged: a failed packet has
+already been shifted and is not automatically replayed; the remaining FIFO
+waits for a later send call. Queued concurrent callers still return before
+their packet is delivered. This is lock safety, not delivery acknowledgment,
+retry redesign or a guarantee of reliable remote delivery.
+
+Seventeen focused caller cases pass, independently rerun, with no TODOs left
+in that suite. Aggregate Node tests are 256/256 with zero TODO; Python checks
+are 54/54 and ESLint passes. The new uninstalled ZIP SHA256 is:
+`f3cf22d2f8e9af39b68e4cae910edb2d1a011631d9564fc4b28b82c2bc321fe5`.
+ZIP/native-manifest and source equality checks include Device, Core, helper and
+unchanged LAN. Packaged Core memory/private-file nineteen cases, strict schema
+compilation and packaged native loader/smoke pass again. The actual Device
+method is tested with mocked GIO boundaries, not a real connected Device or
+full service initialization. There is no new network, desktop or paired-device
+acceptance, and no formal installation was changed.

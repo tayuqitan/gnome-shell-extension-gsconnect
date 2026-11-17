@@ -194,14 +194,83 @@ test('LAN upload caller contracts await direct send; plaintext identity write re
     assert.match(lan, /connection\.get_output_stream\(\)\.write_all_async\(\s*this\.backend\.identity\.serialize\(\)/);
 });
 
-test('KNOWN UNFIXED: ordinary JS errors in Device catch can leave output lock set', {
-    todo: 'Existing e.matches assumption; needs separate guard/finally and queue policy decision',
-}, async () => {
+// Previously a failing TODO: ordinary errors caused e.matches() to throw and
+// leave _outputLock set. This is now an enforced regression, not hidden history.
+test('ordinary JS output error releases the owner lock and later FIFO work resumes', async () => {
     const f = fixture();
     const sent = f.queue.sendPacket(data('failure'));
+    await f.queue.sendPacket(data('queued'));
     f.complete(Error('ordinary JS failure'));
-    const outcome = await sent.then(() => null, error => error);
-    assert.match(outcome.message, /matches/);
-    // Desired safety invariant intentionally fails, retaining explicit TODO evidence.
+    await sent;
     assert.equal(f.queue._outputLock, false);
+    assert.equal(f.logs[0][0].message, 'ordinary JS failure');
+    assert.equal(f.queue._outputQueue.length, 1);
+    const later = f.queue.sendPacket(data('later'));
+    f.complete();
+    await tick();
+    f.complete();
+    await later;
+    assert.deepEqual(f.delivered.map(line => JSON.parse(line).body.text), ['queued', 'later']);
+});
+
+for (const [name, thrown] of [
+    ['serialization Error', Error('serialization')],
+    ['null', null], ['undefined', undefined], ['string', 'non-Error'],
+    ['throwing matches method', {matches() { throw Error('bad matches'); }}],
+    ['throwing matches getter', {get matches() { throw Error('bad getter'); }}],
+]) {
+    test(`${name} is logged and owner lock always releases`, async () => {
+        const f = fixture();
+        const original = f.scope.Packet.prototype.serialize;
+        f.scope.Packet.prototype.serialize = () => { throw thrown; };
+        await f.queue.sendPacket(data('bad serialization'));
+        assert.equal(f.queue._outputLock, false);
+        assert.equal(f.logs.length, 1);
+        assert.equal(f.logs[0][0], thrown);
+        f.scope.Packet.prototype.serialize = original;
+        const recovered = f.queue.sendPacket(data('recovered'));
+        f.complete();
+        await recovered;
+        assert.equal(f.queue._outputLock, false);
+        assert.equal(JSON.parse(f.delivered[0]).body.text, 'recovered');
+    });
+}
+
+test('logger failure propagates but owner finally releases lock without losing queued work', async () => {
+    const f = fixture();
+    const logging = f.scope.debug;
+    f.scope.debug = () => { throw Error('logger failed'); };
+    const sent = f.queue.sendPacket(data('bad'));
+    await f.queue.sendPacket(data('queued'));
+    f.complete(Error('write failure'));
+    await assert.rejects(sent, /logger failed/);
+    assert.equal(f.queue._outputLock, false);
+    assert.equal(f.queue._outputQueue.length, 1);
+    f.scope.debug = logging;
+    const later = f.queue.sendPacket(data('later'));
+    f.complete();
+    await tick();
+    f.complete();
+    await later;
+    assert.deepEqual(f.delivered.map(line => JSON.parse(line).body.text), ['queued', 'later']);
+});
+
+test('non-owner concurrent early returns and construction errors never release another caller lock', async () => {
+    const f = fixture();
+    const sent = f.queue.sendPacket(data('owner'));
+    await f.queue.sendPacket(data('queued'));
+    assert.equal(f.queue._outputLock, true);
+    const original = f.scope.Core.Packet;
+    f.scope.Core.Packet = class { constructor() { throw Error('construction failure'); } };
+    await f.queue.sendPacket(data('not enqueued'));
+    assert.equal(f.queue._outputLock, true);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.queue._outputQueue.length, 1);
+    f.scope.Core.Packet = original;
+    f.complete();
+    await tick();
+    f.complete();
+    await sent;
+    assert.equal(f.queue._outputLock, false);
+    assert.deepEqual(f.delivered.map(line => JSON.parse(line).body.text), ['owner', 'queued']);
 });
