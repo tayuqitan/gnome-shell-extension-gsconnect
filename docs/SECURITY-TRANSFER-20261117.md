@@ -319,3 +319,31 @@ integration with all direct channel callers remain unverified. Passing memory
 and file checks does not prove that this candidate fixes the earlier crash or
 that legacy packet behavior is fully compatible. Production integration needs
 its own review and bounded verification plan.
+
+### Candidate-only plain TCP loopback follow-up
+
+After independent static review, one authorized run of
+`gjs -m installed-tests/gjs/testPacketSpliceLoopback.js --run-reviewed-loopback-candidate`
+passed all five cases. It binds only IPv4 127.0.0.1 with an OS-assigned port and
+uses proxy-disabled clients. Small (18 bytes), Unicode (26,624 bytes), large
+(2,097,152 bytes) and concurrent-send cases verified the complete expected
+length, every byte, SHA256 and actual TCP EOF after sender write-half shutdown.
+The concurrent case additionally required the second call to reject with
+native PENDING and the first 2 MiB packet to arrive intact, without extra data.
+
+The fifth case used only its own socket buffer options and a silent receiver.
+At 200 ms it required an unsettled candidate operation, a non-writable sender
+and readable receiver before canceling. The operation rejected with native
+CANCELLED. Only after its completion did the test half-close and drain the
+partial transfer through EOF; this run received 16,384 bytes matching the
+expected prefix and its hash. This is cancellation evidence, not a successful
+complete transfer or a guaranteed fixed partial length on other systems.
+
+The receiver has a 2 MiB budget plus a one-extra-byte rejection check. Started
+native operations are observed immediately and drained during cleanup; owned
+sockets are closed again after late callbacks and verified closed. Per-case
+cancellation and a 15-second process watchdog bound failure handling. The test
+retains an explicit opt-in and three static contract checks. It does not use
+TLS, original write_all, actual Core.sendPacket, real services or paired data.
+These results strengthen this candidate's plain-TCP feasibility only: they do
+not locate or fix the prior TLS crash and do not authorize production wiring.
