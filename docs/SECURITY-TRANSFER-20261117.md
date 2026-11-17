@@ -189,3 +189,38 @@ harness. These results cover the original packaged download method's TCP,
 length checking, new write helper and cleanup, **not TLS authentication, complete
 LAN initialization, pair management, cache-transaction integration, preferences
 GUI or two-machine clipboard behavior**. No real GSConnect service is launched.
+
+### Unstable packet-TLS diagnostic: disabled by default
+
+`testPackagedPacketTls.js` is an unfinished diagnostic, **not a passing test or
+an installation recommendation**. It refuses to run without an explicit unstable
+opt-in flag. Do not opt in until its fixture/runtime problem has been repaired
+and independently reviewed. The earlier passing packet tests over plaintext TCP
+do not prove TLS behavior; packet-to-file anomalies do not prove socket damage.
+
+The diagnostic extracts the original packaged Packet.serialize/sendPacket and
+uses synthetic data with temporary test-only CA/server/client certificates. The
+fixture initially omitted the GIO server-side application authorization callback;
+GIO requires that callback to accept a client even after CA verification. This
+explains the server rejection in that version, not the later runtime crash.
+
+Offline GnuTLS verify_chain returned no errors for the test server/client chains;
+adding the CA as an issuer did not alter that result. A wrong-IP negative control
+returned BAD_IDENTITY. Incorrect-purpose checks also returned no errors in this
+API, so those results are not presented as proof of EKU enforcement. OpenSSL
+performed its separate explicit purpose checks. System trust was never changed.
+
+After static review of a server-only callback requiring zero validation errors
+and the exact expected test client certificate, one bounded network run passed
+the small-packet expected-length prefix check, then hit a GJS `too much recursion`
+error during the Unicode case's authentication and exited with segmentation
+fault status 139. Remaining cases were not executed. The log contains no useful
+recursion stack. This does not establish a production packet-writing defect;
+earlier Unicode mismatch observations from unstable fixtures are not accepted
+as evidence. No further TLS run was performed after that crash.
+
+The test-owned certificate directory was removed; no test GJS/OpenSSL process or
+repository-local core file remained in the follow-up inspection. No core dump or
+private-key contents were inspected. Static lifecycle improvements and an opt-in
+guard do not count as a demonstrated fix for the runtime crash. Production code
+and the integrity-fixed package are unchanged by this diagnostic.
