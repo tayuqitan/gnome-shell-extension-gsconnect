@@ -347,3 +347,34 @@ retains an explicit opt-in and three static contract checks. It does not use
 TLS, original write_all, actual Core.sendPacket, real services or paired data.
 These results strengthen this candidate's plain-TCP feasibility only: they do
 not locate or fix the prior TLS crash and do not authorize production wiring.
+
+### Candidate-only strict-auth native TLS follow-up
+
+A separate client and supervisor (`testPacketSpliceTlsNativeClient.js` and
+`runPacketSpliceTlsNative.py`) select only the test candidate. They reuse the
+reviewed C peer but never invoke either older writer diagnostic. The client
+extracts only Packet.serialize from the hash-checked package and sends through
+the candidate's owned-bytes single splice. Production Core/LAN remain unchanged.
+
+After independent static review, one authorized fail-fast run passed all three
+cases: small, Unicode and approximately 2 MiB JSON. The supervisor required the
+ordered CONNECT_START, CONNECTED, TLS_VERIFIED, WRITE_START, WRITE_SETTLED,
+CLOSE_START and CLOSED stages, then exact EXPECT/RESULT length and SHA256 plus
+actual native-peer TLS EOF with close-notify. Both processes exited zero with
+no stderr. Authentication still uses a disposable private CA, distinct
+role-constrained leaves, normal client verification and an exact server leaf
+match; the native peer requires client authentication with zero certificate
+errors and an exact client leaf match. No system trust or pairing data changes.
+
+Each case retains private temporary credentials, owned process groups, timeout
+and watchdog cleanup. Failure reporting exposes only recognized stage enums
+and status metadata. A last observed stage is not proof that a later stage
+was never entered, particularly if a process crashes before output is flushed.
+Three static contract checks cover entry-point isolation, authentication,
+protocol matching and bounded stage reporting. The runner remains opt-in.
+
+This establishes the candidate's feasibility for these isolated TLS transfers,
+not the cause or definitive repair of the earlier crash. It does not validate
+TLS cancellation/backpressure/concurrency, production sendPacket integration,
+LAN identity negotiation, legacy plugin compatibility or two-machine use.
+The original unstable diagnostics remain disabled and were not rerun.
