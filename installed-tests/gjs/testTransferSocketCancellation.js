@@ -43,24 +43,36 @@ function listener() {
  * Verify a real asynchronous operation rejects after parent cancellation.
  *
  * @param {function(Gio.Cancellable): Promise<void>} start - Async operation
+ * @param {function(): boolean} pendingCheck - Optional blocked-state check
  * @returns {Promise<void>} Completion
  */
-async function cancelled(start) {
+async function cancelled(start, pendingCheck = () => true) {
     const parent = new Gio.Cancellable();
     const linked = linkCancellables(parent);
     let timer = 0;
     let fired = false;
+    let blocked = false;
+    let checkError = null;
     try {
         const pending = start(linked.cancellable).then(
             () => ({success: true}), error => ({error}));
         timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
             timer = 0;
             fired = true;
-            parent.cancel();
+            try {
+                blocked = pendingCheck();
+            } catch (error) {
+                checkError = error;
+            } finally {
+                parent.cancel();
+            }
             return GLib.SOURCE_REMOVE;
         });
         const outcome = await pending;
-        assert(fired, 'Operation settled before cancellation');
+        if (checkError)
+            throw checkError;
+        assert(fired, `Operation settled before cancellation: ${outcome.error?.message ?? 'success'}`);
+        assert(blocked, 'Expected socket to be non-writable before cancellation');
         assert(!outcome.success &&
             outcome.error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED),
         'Expected real G_IO_ERROR_CANCELLED');
@@ -116,6 +128,68 @@ async function pair(endpoint, owned) {
     }
 }
 
+/**
+ * Exercise real blocked output against a peer that never reads.
+ *
+ * @param {object} endpoint - Loopback listener
+ * @param {object[]} owned - All owned connections
+ * @param {boolean} splice - Use splice instead of bounded write_bytes
+ * @returns {Promise<void>} Verified cancellation and cleanup
+ */
+async function blockedOutput(endpoint, owned, splice) {
+    const [sender, peer] = await pair(endpoint, owned);
+    // Linux SOL_SOCKET/SO_SNDBUF/SO_RCVBUF, only on these test-owned sockets.
+    sender.socket.set_option(1, 7, 4096);
+    peer.socket.set_option(1, 8, 4096);
+    const bytes = new Uint8Array(2 * 1024 * 1024);
+    const input = splice ? Gio.MemoryInputStream.new_from_bytes(new GLib.Bytes(bytes)) : null;
+    const output = sender.get_output_stream();
+    const chunk = new GLib.Bytes(bytes.subarray(0, 65536));
+    let written = 0;
+    try {
+        await cancelled(token => new Promise((resolve, reject) => {
+            const complete = (stream, result) => {
+                try {
+                    if (splice) {
+                        stream.splice_finish(result);
+                    } else {
+                        const count = stream.write_bytes_finish(result);
+                        assert(count > 0, 'Write must progress or fail');
+                        written += count;
+                        assert(written <= bytes.length, 'Bounded write budget exceeded');
+                        if (written < bytes.length) {
+                            const remaining = new GLib.Bytes(bytes.subarray(0,
+                                Math.min(65536, bytes.length - written)));
+                            stream.write_bytes_async(remaining,
+                                GLib.PRIORITY_DEFAULT, token, complete);
+                            return;
+                        }
+                    }
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            if (splice) {
+                output.splice_async(input,
+                    Gio.OutputStreamSpliceFlags.CLOSE_SOURCE |
+                    Gio.OutputStreamSpliceFlags.CLOSE_TARGET,
+                    GLib.PRIORITY_DEFAULT, token, complete);
+            } else {
+                output.write_bytes_async(chunk, GLib.PRIORITY_DEFAULT, token, complete);
+            }
+        }), () => !(sender.socket.condition_check(GLib.IOCondition.OUT) & GLib.IOCondition.OUT) &&
+            Boolean(peer.socket.condition_check(GLib.IOCondition.IN) & GLib.IOCondition.IN));
+        print(`PASS real blocked ${splice ? 'splice' : 'write_bytes'} cancellation; peer readable and sender non-writable`);
+    } finally {
+        // The operation has settled before resources are closed.
+        closeTransferSocket(sender);
+        closeTransferSocket(peer);
+        await closeTransferStreams([input, sender, peer], null);
+        assert(sender.socket.is_closed() && peer.socket.is_closed(), 'Output pair must be reclaimed');
+    }
+}
+
 /** Run only local GIO operations; no certificates or paired data are needed. */
 async function run() {
     // Permission failure is fatal; no alternate address or elevated retry.
@@ -162,6 +236,8 @@ async function run() {
             });
         }));
         print('PASS real TLS handshake cancellation against silent loopback peer');
+        await blockedOutput(endpoint, owned, false);
+        await blockedOutput(endpoint, owned, true);
     } finally {
         try {
             endpoint.server.close();

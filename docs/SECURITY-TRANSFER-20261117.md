@@ -72,9 +72,9 @@ package was not installed.
 
 ## Additional real loopback cancellation check
 
-`gjs -m installed-tests/gjs/testTransferSocketCancellation.js` passes three
-real GIO operations: pending accept, pending socket read, and TLS client handshake
-against a silent peer. A real parent Gio.Cancellable cancels the production linked
+`gjs -m installed-tests/gjs/testTransferSocketCancellation.js` passes five
+real GIO operations: pending accept, pending socket read, TLS client handshake
+against a silent peer, and blocked socket write_bytes/splice. A real parent Gio.Cancellable cancels the production linked
 token after 200 ms; each operation settles with G_IO_ERROR_CANCELLED. Cleanup uses
 the production helpers and verifies that all owned sockets are closed.
 
@@ -86,7 +86,28 @@ GSConnect daemon, installation or system settings are accessed or changed.
 
 This is a real local TCP/TLS cancellation check, not a completed TLS handshake,
 TLS server-side validation, authenticated transfer, production LAN-method
-integration, blocked write/splice test, eight-peer load test, or two-machine
-acceptance. The mocked production-method regression remains complementary, not
+integration, encrypted TLS output backpressure, eight-peer load test, or
+two-machine acceptance. The mocked production-method regression remains complementary, not
 interchangeable. This test/doc-only follow-up does not change the packaged
 production code or the ZIP hash above.
+
+
+The write_bytes/splice cases use separate self-owned loopback pairs and a fixed
+2 MiB zero-filled payload per case. Linux socket send/receive buffers are set to
+4 KiB only on those sockets; the peer never consumes the payload. The write
+case sends at most 2 MiB through sequential write_bytes calls of at most 64 KiB;
+splice uses CLOSE_SOURCE | CLOSE_TARGET, matching the production flag choice. Before
+canceling at 200 ms, the test checks that the sender socket is not writable and
+that the operation has not completed and the peer is readable, then requires
+G_IO_ERROR_CANCELLED. This
+provides real TCP backpressure evidence rather than merely canceling an already
+finished write. Each pair is closed after the operation settles; all remaining
+owned streams are also reclaimed by the outer cleanup. Socket-buffer constants
+are Linux-specific. No user files or arbitrary-size output are involved.
+
+A direct callback-style write_all_async probe on this GJS installation returned
+`Error sending data: Bad address` before reaching the intended blocked state; it
+is not counted as a passing write_all test. The passing bounded write_bytes loop
+must not be substituted as evidence for production write_all_async behavior.
+The cause of that probe failure and its relevance to production's promisified
+write_all path remain unverified; no production change was made on that basis.
