@@ -7,9 +7,10 @@ import {readFileSync} from 'node:fs';
 
 /**
  * Construct the actual dialog with mocked GTK surfaces.
+ * @param {object} options - Optional in-memory backend and callback overrides
  * @returns {object} Isolated UI fixture
  */
-function fixture() {
+function fixture(options = {}) {
     const widgets = [];
     class Widget {
         constructor(properties = {}) {
@@ -40,12 +41,20 @@ function fixture() {
     vm.runInNewContext(source, scope);
     const changes = [];
     let clears = 0;
-    const history = {maxItems: 50, maxBytes: 64 * 1048576, bytes: 0, list: () => [],
-        subscribe: () => () => {}};
+    let unsubscribed = 0;
+    const limits = [];
+    const removed = [];
+    const entries = options.entries || [];
+    const history = {maxItems: 50, maxBytes: 64 * 1048576, bytes: 0, list: () => entries,
+        get: key => entries.find(entry => entry.key === key),
+        remove: key => removed.push(key),
+        subscribe: () => () => { unsubscribed++; }};
     const dialog = new scope.Dialog(history, {onClear: () => { clears++; },
-        persistence: {getEnabled: () => false, setEnabled: value => changes.push(value),
+        onLimits: value => limits.push(value), onActivate: options.onActivate || (() => {}),
+        persistence: options.persistence || {getEnabled: () => false, setEnabled: value => changes.push(value),
             getStatus: () => 'status'}});
-    return {dialog, widgets, changes, clears: () => clears};
+    return {dialog, widgets, changes, history, limits, removed,
+        unsubscribed: () => unsubscribed, clears: () => clears};
 }
 
 test('opening history does not enable persistence and explains plaintext limits', () => {
@@ -66,4 +75,88 @@ test('clear button delegates even when the in-memory list is already empty', () 
     const f = fixture();
     f.widgets.find(w => w.label === '清空历史').events.clicked();
     assert.equal(f.clears(), 1);
+});
+
+
+/**
+ * Non-sensitive in-memory record; no filesystem or service handles.
+ * @returns {object} History entry
+ */
+function entry() {
+    return {key: 'local:fixture', direction: 'local', created: 0,
+        offer: {files: [], types: ['application/x-test']}, values: new Map()};
+}
+
+test('history limit edits apply only on click and convert MiB to bytes', () => {
+    const f = fixture();
+    assert.deepEqual(f.limits, []);
+    f.dialog.count.set_value(12);
+    f.dialog.capacity.set_value(3);
+    assert.deepEqual(f.limits, []);
+    f.widgets.find(w => w.label === '应用限制').events.clicked();
+    assert.equal(f.limits[0].maxItems, 12);
+    assert.equal(f.limits[0].maxBytes, 3 * 1048576);
+});
+
+test('persistence backend failure is reported without leaking its error detail', () => {
+    const f = fixture({persistence: {getEnabled: () => false,
+        getStatus: () => 'disabled', setEnabled: () => { throw Error('private detail'); }}});
+    const control = f.widgets.find(w => w.label?.startsWith('将字节历史'));
+    control.active = true;
+    control.events.toggled();
+    assert.equal(f.dialog.persistenceStatus.label, '更改磁盘历史设置失败');
+    assert.doesNotMatch(f.dialog.persistenceStatus.label, /private detail/);
+});
+
+test('closing each independent history window releases its subscription', () => {
+    const a = fixture();
+    const b = fixture();
+    a.dialog.window.events.response();
+    assert.equal(a.unsubscribed(), 1);
+    assert.equal(b.unsubscribed(), 0);
+    b.dialog.destroy();
+    assert.equal(b.unsubscribed(), 1);
+});
+
+test('cleared history record cannot activate through a stale restore button', async () => {
+    let activated = 0;
+    const f = fixture({entries: [entry()], onActivate: () => { activated++; }});
+    const button = f.widgets.find(w => w.label === '恢复');
+    f.history.get = () => undefined;
+    await button.events.clicked();
+    assert.equal(activated, 0);
+    assert.match(f.dialog.status.label, /此记录已被清理/);
+    assert.equal(button.sensitive, true);
+});
+
+test('pending activation does not update a destroyed window', async () => {
+    let finish;
+    const f = fixture({entries: [entry()], onActivate: () => new Promise(resolve => { finish = resolve; })});
+    const button = f.widgets.find(w => w.label === '恢复');
+    const pending = button.events.clicked();
+    assert.equal(button.sensitive, false);
+    f.dialog.destroy();
+    const before = f.dialog.status.label;
+    finish();
+    await pending;
+    assert.equal(f.dialog.status.label, before);
+    assert.equal(f.unsubscribed(), 1);
+    assert.equal(button.sensitive, false);
+});
+
+test('pending activation does not re-enable a superseded row after render', async () => {
+    let finish;
+    const f = fixture({entries: [entry()], onActivate: () => new Promise(resolve => { finish = resolve; })});
+    const oldButton = f.widgets.find(w => w.label === '恢复');
+    const pending = oldButton.events.clicked();
+    f.dialog.render();
+    finish();
+    await pending;
+    assert.equal(oldButton.sensitive, false);
+});
+
+test('deleting a row delegates only the selected record key', () => {
+    const f = fixture({entries: [entry()]});
+    f.widgets.find(w => w.label === '删除').events.clicked();
+    assert.deepEqual(f.removed, ['local:fixture']);
 });
