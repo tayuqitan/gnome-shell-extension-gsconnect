@@ -378,3 +378,44 @@ not the cause or definitive repair of the earlier crash. It does not validate
 TLS cancellation/backpressure/concurrency, production sendPacket integration,
 LAN identity negotiation, legacy plugin compatibility or two-machine use.
 The original unstable diagnostics remain disabled and were not rerun.
+
+### Candidate-only authenticated TLS semantics
+
+A separate semantics client, supervisor and C peer leave the previous fixtures
+unchanged. After independent static review, one fail-fast run passed all four
+cases under the same dedicated-CA, required-client-auth and exact-leaf policy:
+
+- Concurrent submission: the second operation returned native PENDING while
+  the first approximately 2 MiB packet reached exact length/hash and TLS EOF.
+- Pre-cancellation: native CANCELLED after authentication, with zero application
+  bytes at the peer and a clean TLS EOF.
+- Already-closed output: native CLOSED, caller token unchanged, zero application
+  bytes and clean TLS EOF.
+- Blocked cancellation: the authenticated C peer emitted PAUSED and waited for
+  a supervisor DRAIN command without reading application data. Only then did
+  the supervisor permit the client to write. At 200 ms the client required an
+  unsettled candidate and non-writable raw socket before canceling. The native
+  write settled with CANCELLED before the client force-closed its own socket.
+  The supervisor released peer reads only after verifying the completed client
+  cancellation protocol. The peer reported a permitted transport truncation,
+  and the received nonempty, shorter-than-full prefix matched the expected
+  bytes' SHA256. This result is explicitly EOF=0, not a complete TLS transfer.
+
+The cancellation result accepts only TLS_EOF or CONNECTION_CLOSED, not generic
+errors, timeout, local cancellation or a clean EOF. A private 0600 expected-data
+file contains only generated fixture bytes, is bounded by 2 MiB, and is removed
+with its 0700 case directory. Child processes, sockets and pending callbacks
+are cleaned up with the same timeout/watchdog safeguards. GO control bytes are
+copied into owned Uint8Array storage before crossing the Promise boundary.
+Three offline parser/static tests reject incorrect EOF, truncation reasons and
+prefix hashes. No real services, existing certificates, pairing data or installed code
+were used or changed; all certificates here were disposable fixture material.
+
+These results support candidate semantics on this local GIO/TLS stack only.
+Integrating into Core.sendPacket would affect every control-packet caller,
+including the device output queue and direct LAN callers, not just clipboard.
+Such integration must preserve UTF-8/newline serialization, explicit/default
+cancellation, GIO error matching, output ownership and native pending behavior.
+LAN's initial plaintext identity write is a separate path and is not covered
+by this candidate integration. No production integration has been made, and
+the earlier crash's root cause remains undetermined.
