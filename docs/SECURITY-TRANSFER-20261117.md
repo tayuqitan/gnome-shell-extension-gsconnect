@@ -62,7 +62,8 @@ resource patch against real peers in an appropriately isolated environment.
   using system Mutter plus libraries from the extracted ZIP, not build-library
   paths. Native bridge code itself is unchanged.
 
-New ZIP SHA256:
+Earlier resource-hardening ZIP SHA256 (superseded by the integrity fix below;
+do not install this earlier package):
 `242e042da8308e649c4e151ef1238fae4610469acb633bb4dbc947764f8ddfa3`
 
 At the package checkpoint above, no new installed-extension activation, real
@@ -89,7 +90,8 @@ TLS server-side validation, authenticated transfer, production LAN-method
 integration, encrypted TLS output backpressure, eight-peer load test, or
 two-machine acceptance. The mocked production-method regression remains complementary, not
 interchangeable. This test/doc-only follow-up does not change the packaged
-production code or the ZIP hash above.
+production code or that historical ZIP hash. The later integrity fix below
+does change production code and has a new package hash.
 
 
 The write_bytes/splice cases use separate self-owned loopback pairs and a fixed
@@ -111,3 +113,50 @@ is not counted as a passing write_all test. The passing bounded write_bytes loop
 must not be substituted as evidence for production write_all_async behavior.
 The cause of that probe failure and its relevance to production's promisified
 write_all path remain unverified; no production change was made on that basis.
+
+## File write integrity finding and targeted correction
+
+The later isolated `testWriteAllBoundaries.js --legacy-probe` reproduced output
+corruption on this machine, not merely the original socket error. Its actual
+production-shaped case uses `copyExact`, real asynchronous memory-input reads
+returning `GLib.Bytes.get_data()` arrays of at most 64 KiB, and the same
+`Gio._promisify(..., 'write_all_async')` registration as service/init.js. Writing
+2 MiB to a PRIVATE file in a new 0700 temporary directory produced incorrect
+bytes when read back after close. Both the original input and every retained
+chunk matched an independent deterministic formula; the output did not.
+
+The developer and independent reviewer reproduced this. The callback-after-wrap
+64 KiB file case also failed; other memory/file cases passed in those runs.
+These observations do not establish the exact GJS/native-marshalling root cause
+or show that all write_all users fail. The legacy diagnostic deliberately exits
+nonzero on corruption; it is not reported as an expected successful test.
+
+Rich download now uses `writeBytes`, which owns native storage through GLib.Bytes
+and performs sequential `write_bytes_async` calls. It checks every partial-write
+count, rejects zero/negative/non-integer/oversize counts, forwards cancellation,
+and retains native storage until each completion. Only rich payload writes are
+changed; legacy packet/identity write paths are not silently broadened by this
+fix. No formal installation or pairing data was changed.
+
+The default GJS test validates the corrected helper and copyExact path against
+real memory and PRIVATE temporary-file outputs, comparing every output byte to
+an independent formula. Node fixtures separately exercise partial counts and
+cancellation boundaries; they must not be described as real disk partial-write
+or kernel-cancellation evidence. Full network/desktop acceptance remains open.
+
+
+### Integrity-fix verification and current package
+
+- Complete Node suite: 196 passed; Python suite: 41 passed; full src/installed-tests
+  ESLint clean. Default real GJS write-integrity suite: 8 passed.
+- Real loopback cancellation/backpressure suite: 5 passed, all owned sockets
+  reclaimed. Independent reviewer additionally ran the 8 real integrity cases
+  and 47 focused Node cases; no blocking issue found in the reviewed patch.
+- The new ZIP contains byte-identical revised LAN code and writeBytes helper,
+  passes native manifest checks, excludes Python caches, and passes strict
+  schemas, three Meson data checks, packaged native loader and native GJS smoke.
+- This is not a new installed Shell/native bridge or two-machine acceptance.
+  No package was installed. Other legacy write_all call sites remain unchanged.
+
+Current integrity-fixed ZIP SHA256:
+`d445fa3927ec9c43562d2f4cd1d8174634273ed7aa41f0906971dee0b05182cb`

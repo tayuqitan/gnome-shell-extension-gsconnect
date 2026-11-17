@@ -45,7 +45,7 @@ function fixture(stage) {
         output_stream: {splice_async: (_source, _flags, _priority, token) => wait('splice', token, 1)}};
     const target = {...closable('target'), write_all_async: (_bytes, _priority, token) => wait('write', token)};
     const source = closable('source');
-    const scope = {Promise, Set, Error, debug() {}, logError() {}, _configureSocket() {},
+    const scope = {writeBytes: (target, bytes, token) => target.write_all_async(bytes, 0, token), Promise, Set, Error, debug() {}, logError() {}, _configureSocket() {},
         TRANSFER_MIN: 1739, TRANSFER_MAX: 1740,
         GLib: {PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false,
             timeout_add_seconds(_priority, seconds, callback) { assert.equal(seconds, 5); timers.set(++nextTimer, callback); return nextTimer; },

@@ -7,7 +7,7 @@ GSConnect 配置；仍以同一 Unix 用户连接宿主 Xwayland 显示。不要
 测试只接受此前已验证的 ZIP，SHA256 为：
 
 ```
-242e042da8308e649c4e151ef1238fae4610469acb633bb4dbc947764f8ddfa3
+d445fa3927ec9c43562d2f4cd1d8174634273ed7aa41f0906971dee0b05182cb
 ```
 
 这是包含原生桥、准入额度、可选字节历史持久化及发送总期限/取消修复的检查点包。
@@ -69,3 +69,6 @@ bash installed-tests/manual/isolated-shell-smoke.sh --bridge /absolute/path/to/v
 安全不变量；ESLint 检查 GJS 客户端。无参数客户端和无参数 runner 必须拒绝运行。
 这些离线检查不证明图形会话或真实桥测试已经通过。当前执行器不能连接用户显示 socket，
 因此新 `--bridge` 模式需要用户图形终端执行后才能记录实测结果。
+
+
+本次校验值对应额外修复文件写入完整性的包：新写入路径已通过真实私有临时文件逐字节回读验证；旧包的 Shell/桥接通过记录不能当作此新包的桌面或双机验收。尚未安装此包，仍不代表完整产品验收通过。

@@ -10,6 +10,7 @@ import Config from '../../config.js';
 import * as Core from '../core.js';
 import Device from '../device.js';
 import {copyExact} from '../utils/exactTransfer.js';
+import {writeBytes} from '../utils/writeBytes.js';
 import {linkCancellables, closeTransferSocket, closeTransferStreams} from '../utils/transferCancellation.js';
 
 // Retain compatibility with GLib < 2.80, which lacks GioUnix
@@ -977,7 +978,7 @@ export const Channel = GObject.registerClass({
                 cancellable.set_error_if_cancelled();
                 connection = await this._encryptClient(rawConnection, cancellable);
                 await copyExact(packet.payloadSize, read, bytes =>
-                    target.write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancellable),
+                    writeBytes(target, bytes, cancellable),
                 onProgress);
             } catch (error) {
                 failure = error;

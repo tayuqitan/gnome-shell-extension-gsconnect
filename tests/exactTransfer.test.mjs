@@ -87,8 +87,8 @@ function adapter(length, options = {}) {
         SocketClient: class { async connect_async() { return connection; } }};
     const linkCancellables = () => ({cancellable: {connect() { return 0; }, set_error_if_cancelled() {}}, dispose() {}});
     const closeTransferStreams = streams => Promise.allSettled([...new Set(streams.filter(Boolean))].map(stream => new Promise((resolve, reject) => stream.close_async(0, null, (source, result) => { try { source.close_finish(result); resolve(); } catch (e) { reject(e); } }))));
-    const download = new Function('Gio', 'GLib', 'copyExact', 'linkCancellables', 'closeTransferSocket', 'closeTransferStreams',
-        `return async function(packet,target,cancellable=null,onProgress=null) {${downloadBody}}`)(Gio, {PRIORITY_DEFAULT: 0}, copyExact, linkCancellables, () => {}, closeTransferStreams);
+    const download = new Function('Gio', 'GLib', 'copyExact', 'linkCancellables', 'closeTransferSocket', 'closeTransferStreams', 'writeBytes',
+        `return async function(packet,target,cancellable=null,onProgress=null) {${downloadBody}}`)(Gio, {PRIORITY_DEFAULT: 0}, copyExact, linkCancellables, () => {}, closeTransferStreams, (target, bytes, token) => target.write_all_async(bytes, 0, token));
     return {closed, writes, run: (size, onProgress = null) => download.call({host: 'localhost', _encryptClient: value => value},
         {type: 'gsconnect.clipboard.rich', payloadSize: size, payloadTransferInfo: {port: 1}}, target, {}, onProgress)};
 }
