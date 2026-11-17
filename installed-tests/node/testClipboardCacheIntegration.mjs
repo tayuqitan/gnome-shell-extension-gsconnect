@@ -4,6 +4,10 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+/**
+ * Build an isolated test fixture.
+ * @returns {object} Test controls and observed state
+ */
 function setup() {
     const source = readFileSync(new URL('../../src/service/utils/richClipboard.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/gm, '').replace('export const CAPABILITY', 'const CAPABILITY')

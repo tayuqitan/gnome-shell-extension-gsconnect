@@ -6,6 +6,11 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../../src/service/backends/lan.js', import.meta.url), 'utf8');
 const body = source.slice(source.indexOf('    async download('), source.indexOf('    async upload('));
+/**
+ * Build an isolated download failure fixture.
+ * @param {string} mode - Failure stage to simulate
+ * @returns {object} Channel and observed stream cleanup
+ */
 function fixture(mode) {
     const closed = [];
     const stream = name => ({close_async(_priority, cancel, callback) {

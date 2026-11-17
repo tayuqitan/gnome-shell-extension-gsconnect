@@ -7,6 +7,10 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 
+/**
+ * Build an isolated clipboard deadline fixture.
+ * @returns {object} Component and captured timer behavior
+ */
 function fixture() {
     const deadlines = [];
     const timers = new Map();

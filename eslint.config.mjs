@@ -315,4 +315,11 @@ export default defineConfig([
             }],
         },
     },
+    {
+        // Node fixtures are distinct from GJS tests and browser code.
+        files: ['installed-tests/node/**/*.{mjs,cjs}', 'tests/**/*.{mjs,cjs}'],
+        languageOptions: {
+            globals: globals.node,
+        },
+    },
 ]);

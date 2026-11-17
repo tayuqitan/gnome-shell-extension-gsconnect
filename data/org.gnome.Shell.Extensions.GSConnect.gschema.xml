@@ -122,6 +122,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Clipboard">
+    <key name="history-persist" type="b">
+      <default>false</default>
+      <summary>Opt in to plaintext local clipboard byte history</summary>
+      <description>Off by default. Cached non-file byte snapshots may be written to private local storage; unmarked secrets cannot be detected. File references and remote leases are never persisted.</description>
+    </key>
     <key name="history-max-items" type="u">
       <range min="0" max="1000"/>
       <default>50</default>

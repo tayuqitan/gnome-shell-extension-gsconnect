@@ -8,6 +8,14 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 
+/**
+ * Build an isolated clipboard portal fixture.
+ * @param {object} options - Portal test modes
+ * @param {boolean} options.available - Native helper availability
+ * @param {object|null} options.nativeAdapter - Optional fake native adapter
+ * @param {boolean} options.experimental - Enable experimental gate fixture
+ * @returns {object} Portal and observed test state
+ */
 function fixture({available = true, nativeAdapter = null, experimental = false} = {}) {
     let serial = 0;
     const signals = [], sources = [], owners = [], unsets = [], transfers = [];
@@ -81,6 +89,11 @@ function fixture({available = true, nativeAdapter = null, experimental = false} 
         failConstruction() { failConstruction = true; }};
 }
 
+/**
+ * Load the real loader with a simulated missing or incomplete native library.
+ * @param {object|null} candidate - Optional native namespace candidate
+ * @returns {Promise<object>} Adapter and captured errors
+ */
 async function unavailableAdapter(candidate = null) {
     const code = readFileSync(new URL('../../src/shell/clipboardNative.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/gm, '')

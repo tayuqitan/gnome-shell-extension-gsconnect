@@ -9,6 +9,8 @@ import GLib from 'gi://GLib';
 import * as Components from '../components/index.js';
 import Plugin from '../plugin.js';
 import RichClipboard, {CAPABILITY} from '../utils/richClipboard.js';
+import ClipboardHistoryPersistence from '../utils/clipboardHistoryPersistence.js';
+import {historyStorageForDevice} from '../utils/clipboardHistoryStorage.js';
 import ClipboardHistoryDialog from '../utils/clipboardHistoryDialog.js';
 import {getClipboardCacheStorage, setClipboardCacheLimit} from '../utils/clipboardCacheStorage.js';
 
@@ -85,6 +87,19 @@ const ClipboardPlugin = GObject.registerClass({
         this._localTimestamp = 0;
         this._remoteBuffer = null;
         this._rich = new RichClipboard(this, this._clipboard);
+        this._historyPersistence = new ClipboardHistoryPersistence(this._rich.history,
+            historyStorageForDevice(this.device.id));
+        const updatePersistence = () => {
+            try {
+                this._historyPersistence.setEnabled(this.settings.get_boolean('history-persist'));
+            } catch {
+                debug('Clipboard history persistence initialization failed');
+            }
+        };
+        // The default off state must perform no disk I/O.
+        if (this.settings.get_boolean('history-persist'))
+            updatePersistence();
+        this._historyPersistenceId = this.settings.connect('changed::history-persist', updatePersistence);
         this.device.lookup_action('clipboardHistory').set_enabled(true);
     }
 
@@ -222,6 +237,14 @@ const ClipboardPlugin = GObject.registerClass({
         if (!this._historyDialog || this._historyDialog.destroyed) {
             this._historyDialog = new ClipboardHistoryDialog(this._rich.history, {
                 peerName: this.device.name,
+                persistence: {
+                    getEnabled: () => this.settings.get_boolean('history-persist'),
+                    setEnabled: value => {
+                        if (!this.settings.set_boolean('history-persist', value))
+                            throw new Error('保存设置失败');
+                    },
+                    getStatus: () => this._historyPersistence.status,
+                },
                 disk: {
                     getLimit: () => Gio.Application.get_default().settings
                         .get_value('clipboard-cache-max-bytes').deepUnpack(),
@@ -237,6 +260,11 @@ const ClipboardPlugin = GObject.registerClass({
                         .get_value('clipboard-cache-max-bytes').deepUnpack()).retryFailedRollbacks(),
                 },
                 onActivate: entry => this._rich.activateHistory(entry),
+                onClear: () => {
+                    this._rich.history.clear();
+                    // Retry failed removal even if memory was already empty.
+                    this._historyPersistence.save();
+                },
                 onLimits: ({maxItems, maxBytes}) => {
                     this.settings.set_uint('history-max-items', maxItems);
                     this.settings.set_uint('history-max-bytes', maxBytes);
@@ -252,6 +280,8 @@ const ClipboardPlugin = GObject.registerClass({
 
     destroy() {
         this._historyDialog?.destroy();
+        this.settings.disconnect(this._historyPersistenceId);
+        this._historyPersistence.close();
         this._rich.destroy();
         if (this._clipboard && this._textChangedId) {
             this._clipboard.disconnect(this._textChangedId);

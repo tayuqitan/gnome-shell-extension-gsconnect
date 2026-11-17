@@ -303,6 +303,8 @@ export default class RichClipboard {
     async activateHistory(entry) {
         if (this.history.get(entry.key) !== entry || !this.clipboard.richAvailable)
             throw new Error('历史记录不可用，或 GNOME 剪贴板桥未连接');
+        if (entry.persisted && (entry.offer.files.length || !entry.values.size))
+            throw new Error('持久化记录没有可用字节快照，请重新复制');
         const activation = ++this.historyActivation;
         const generation = this.clipboard.generation;
         const files = entry.offer.files;
@@ -510,8 +512,8 @@ export default class RichClipboard {
             const rollback = transaction || error.cacheTransaction;
             if (rollback) {
                 try {
-                    // Cancellation can reject request() before transfer streams
-                    // settle. Never remove transaction paths while writers live.
+                    // Cancellation can reject request() before streams
+                    // settle. Never remove paths while writers live.
                     await Promise.allSettled(rollback.handle.children.map(child =>
                         this.cacheWriters.get(child.file.get_uri())).filter(Boolean));
                     await storage.rollback(rollback);

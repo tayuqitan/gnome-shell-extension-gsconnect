@@ -6,6 +6,13 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
+/**
+ * Build a minimal signal emitter.
+ * @param {Array} events - Captured lifecycle events
+ * @param {string} label - Emitter name
+ * @param {object} fields - Additional fake properties
+ * @returns {object} Fake signal emitter
+ */
 function emitter(events, label, fields = {}) {
     const signals = new Map();
     let next = 0;
@@ -19,6 +26,14 @@ function emitter(events, label, fields = {}) {
     });
 }
 
+/**
+ * Build an isolated paste gate fixture.
+ * @param {object} options - Failure modes to simulate
+ * @param {boolean} options.conflict - Simulate accelerator conflict
+ * @param {boolean} options.connectFailure - Reject signal registration
+ * @param {boolean} options.notifyFailure - Reject notification
+ * @returns {object} Gate and controllable desktop stubs
+ */
 function fixture({conflict = false, connectFailure = false, notifyFailure = false} = {}) {
     const calls = [];
     let now = 100;

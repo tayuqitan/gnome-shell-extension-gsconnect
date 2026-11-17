@@ -548,3 +548,23 @@ test('publication invalidation revokes unretained uploads even without an owner 
     assert.equal(transfer.canceled, true);
     complete(); await sending;
 });
+
+
+test('persisted history restores cached bytes offline and never requests an old lease', async () => {
+    const r = await rig();
+    const entry = r.helper.history.addRemote(offer(), 'peer');
+    r.helper.history.attachValue(entry.id, 'image/png', new Uint8Array([8, 9]));
+    entry.persisted = true;
+    r.device.connected = false;
+    await r.helper.activateHistory(entry);
+    assert.equal(r.sent.filter(p => p.body.op === 'request').length, 0);
+    assert.deepEqual(r.offered.at(-1)[2]('image/png'), new Uint8Array([8, 9]));
+});
+
+test('persisted empty history cannot fall back to requesting the source', async () => {
+    const r = await rig();
+    const entry = r.helper.history.addRemote(offer(), 'peer');
+    entry.persisted = true;
+    await assert.rejects(r.helper.activateHistory(entry), /持久化记录没有可用字节快照/);
+    assert.equal(r.sent.filter(p => p.body.op === 'request').length, 0);
+});

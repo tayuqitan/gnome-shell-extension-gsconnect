@@ -88,7 +88,7 @@ export class ClipboardCacheStorage {
                     throw error;
             }
             trackedActual += actual;
-            // Applications may append to exposed files. Never trust the original
+            // Apps may append to exposed files. Never trust the original
             // payload length for subsequent admission decisions.
             if (item.state === 'complete')
                 item.size = Math.max(item.size, actual);
@@ -109,6 +109,8 @@ export class ClipboardCacheStorage {
         if (!Array.isArray(files) || !files.length || files.length > 128 ||
             !files.every(file => typeof file.name === 'string' && file.name.length > 0 &&
                 file.name !== '.' && file.name !== '..' && file.name.length <= 255 &&
+                // Reject control characters and path separators in peer names.
+                // eslint-disable-next-line no-control-regex
                 !/[\x00-\x1f/\\]/.test(file.name) &&
                 Number.isSafeInteger(file.size) && file.size >= 0))
             throw new Error('Invalid clipboard file batch');
@@ -213,18 +215,28 @@ export class ClipboardCacheStorage {
 }
 
 let sharedStorage;
-/** All paired devices share one disk allowance. */
+/**
+ * All paired devices share one disk allowance.
+ *
+ * @param {number} limit - Global cache admission allowance in bytes
+ * @returns {ClipboardCacheStorage} Shared per-process cache storage
+ */
 export function getClipboardCacheStorage(limit) {
     if (!sharedStorage) {
         sharedStorage = new ClipboardCacheStorage(GLib.build_filenamev([
-            GLib.get_user_cache_dir(), 'gsconnect', 'clipboard-cache-v2']), limit);
+            GLib.get_user_cache_dir(), 'gsconnect', 'clipboard-cache-v2',
+        ]), limit);
     } else {
         sharedStorage.setLimit(limit);
     }
     return sharedStorage;
 }
 
-/** Apply UI changes without creating directories or touching existing data. */
+/**
+ * Apply UI changes without creating directories or touching existing data.
+ *
+ * @param {number} limit - Updated global allowance in bytes
+ */
 export function setClipboardCacheLimit(limit) {
     sharedStorage?.setLimit(limit);
 }

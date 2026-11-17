@@ -7,9 +7,10 @@ import ClipboardCacheControls from './clipboardCacheControls.js';
 
 /** History UI deliberately does not preview copied text or images. */
 export default class ClipboardHistoryDialog {
-    constructor(history, {peerName = '', onActivate, onLimits, disk} = {}) {
+    constructor(history, {peerName = '', onActivate, onLimits, onClear, disk, persistence} = {}) {
         this.history = history;
         this.onActivate = onActivate;
+        this.persistence = persistence;
         this.window = new Gtk.Dialog({
             title: `剪贴板历史 · ${peerName}`,
             application: Gio.Application.get_default(),
@@ -22,13 +23,32 @@ export default class ClipboardHistoryDialog {
         content.spacing = 10;
         content.border_width = 12;
         content.add(new Gtk.Label({
-            label: '仅本次会话保存。选择后恢复剪贴板，再在目标应用按 Ctrl+V。',
+            label: '默认仅本次会话保存。选择后恢复剪贴板，再在目标应用按 Ctrl+V。',
             wrap: true, xalign: 0,
         }));
         content.add(new Gtk.Label({
             label: '文件历史不预传文件内容。源文件已改变、被删除或历史已清理时可能无法再次粘贴。',
             wrap: true, xalign: 0,
         }));
+        if (persistence) {
+            const save = new Gtk.CheckButton({label: '将字节历史保存到本机磁盘（明文，默认关闭）'});
+            save.active = persistence.getEnabled();
+            const state = this.persistenceStatus = new Gtk.Label({xalign: 0, wrap: true,
+                label: persistence.getStatus()});
+            save.connect('toggled', () => {
+                try {
+                    persistence.setEnabled(save.active);
+                    state.label = persistence.getStatus();
+                } catch {
+                    state.label = '更改磁盘历史设置失败';
+                }
+            });
+            content.add(save);
+            content.add(new Gtk.Label({xalign: 0, wrap: true,
+                label: '可能保存未标记的密码等敏感正文。仅保存已缓存文字/图片等字节快照，总正文最多 8 MiB；' +
+                    '文件记录和旧网络租约不保存。关闭时尝试清除磁盘快照，不等于安全擦除。'}));
+            content.add(state);
+        }
         const controls = new Gtk.Box({spacing: 8});
         controls.add(new Gtk.Label({label: '条数'}));
         this.count = Gtk.SpinButton.new_with_range(0, 1000, 1);
@@ -52,7 +72,13 @@ export default class ClipboardHistoryDialog {
         if (disk)
             content.add(new ClipboardCacheControls(disk).widget);
         const clear = new Gtk.Button({label: '清空历史'});
-        clear.connect('clicked', () => history.clear());
+        clear.connect('clicked', () => {
+            if (onClear)
+                onClear();
+            else
+                history.clear();
+            this.render();
+        });
         content.add(clear);
         this.status = new Gtk.Label({xalign: 0, wrap: true});
         content.add(this.status);
@@ -70,6 +96,8 @@ export default class ClipboardHistoryDialog {
     }
 
     render() {
+        if (this.persistenceStatus)
+            this.persistenceStatus.label = this.persistence.getStatus();
         const serial = this.renderSerial = (this.renderSerial || 0) + 1;
         for (const child of this.rows.get_children())
             child.destroy();

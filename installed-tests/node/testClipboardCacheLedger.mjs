@@ -5,6 +5,11 @@ import test from 'node:test';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../../src/service/utils/clipboardCacheLedger.js', import.meta.url));
 const {default: Ledger} = await import(`data:text/javascript;base64,${source.toString('base64')}`);
+/**
+ * Build an isolated quota ledger.
+ * @param {number} limit - Admission allowance in fixture bytes
+ * @returns {object} Ledger and observed removed handles
+ */
 function setup(limit = 100) {
     const removed = [];
     const ledger = new Ledger({limit, remove: async handle => removed.push(handle)});

@@ -4,13 +4,28 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {ClipboardCacheStorage} from '../../src/service/utils/clipboardCacheStorage.js';
 
+/**
+ * Check a storage invariant.
+ *
+ * @param {boolean} value - Invariant result
+ * @param {string} message - Failure explanation
+ */
 function assert(value, message) {
     if (!value)
         throw Error(message);
 }
+/**
+ * Require an operation to reject invalid input.
+ *
+ * @param {function(): void} callback - Operation expected to throw
+ */
 function fails(callback) {
     let failed = false;
-    try { callback(); } catch { failed = true; }
+    try {
+        callback();
+    } catch {
+        failed = true;
+    }
     assert(failed, 'expected rejection');
 }
 // Tests never use the real cache, clipboard, desktop or user source files.
@@ -27,8 +42,12 @@ fails(() => storage.begin([{name: '../source', size: 3}]));
 fails(() => storage.begin([{name: 'a/b', size: 3}]));
 const retry = storage.begin([{name: 'retry', size: 1}]);
 const originalRemove = storage._remove;
-storage._remove = () => { throw Error('simulated busy filesystem'); };
-try { await storage.rollback(retry); } catch {}
+storage._remove = () => {
+    throw Error('simulated busy filesystem');
+};
+try {
+    await storage.rollback(retry);
+} catch {}
 assert(storage.snapshot().failedBatches === 1, 'failed batch eligible for retry');
 storage._remove = originalRemove;
 const retried = await storage.retryFailedRollbacks();
@@ -45,7 +64,7 @@ assert(kept.handle.children[0].file.query_exists(null), 'lowering limit preserve
 GLib.file_set_contents(kept.handle.children[0].file.get_path(), 'x'.repeat(2 * 1024 * 1024));
 fails(() => storage.begin([{name: 'overgrown', size: 1}]));
 assert(storage.snapshot().used > 1024 * 1024, 'appended data re-accounted before allocation');
-// Cleanup only files/dirs created by this test, not through production eviction.
+// Remove only this test fixture, without production cache eviction.
 kept.handle.children[0].file.delete(null);
 kept.handle.children[0].folder.delete(null);
 kept.handle.directory.delete(null);

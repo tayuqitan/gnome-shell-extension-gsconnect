@@ -8,7 +8,9 @@ export default class ClipboardCacheControls {
         this.disk = disk;
         this.destroyed = false;
         this.widget = new Gtk.Box({orientation: Gtk.Orientation.VERTICAL, spacing: 6});
-        this.widget.connect('destroy', () => { this.destroyed = true; });
+        this.widget.connect('destroy', () => {
+            this.destroyed = true;
+        });
         const row = new Gtk.Box({spacing: 8});
         row.add(new Gtk.Label({label: '本机共享下载额度 GiB'}));
         this.capacity = Gtk.SpinButton.new_with_range(0, 1024, 1);

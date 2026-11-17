@@ -4,6 +4,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
+/**
+ * Build an isolated test fixture.
+ * @returns {object} Test controls and observed state
+ */
 function fixture() {
     const widgets = [];
     class Widget {
