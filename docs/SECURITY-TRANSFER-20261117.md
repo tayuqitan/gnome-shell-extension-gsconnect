@@ -160,3 +160,32 @@ or kernel-cancellation evidence. Full network/desktop acceptance remains open.
 
 Current integrity-fixed ZIP SHA256:
 `d445fa3927ec9c43562d2f4cd1d8174634273ed7aa41f0906971dee0b05182cb`
+
+### Packaged helper and extracted download-method follow-up
+
+The integrity-fixed ZIP was checked again in an independent 0700 layout, using
+helpers extracted directly from the archive rather than imports from the source
+checkout. All eight real memory/private-file integrity and pre-cancellation
+cases passed, and the temporary layout was removed.
+
+`testPackagedRichDownload.js VERIFIED_PACKAGE_DIRECTORY` validates fixed SHA256
+hashes for the packaged LAN file and its three helper modules, then extracts the
+unchanged download method using unique source boundaries. It deliberately does
+not import the complete LAN module or service initialization, which would pull
+in Device, plugins and other desktop/service dependencies. The actual packaged
+helper modules are imported, not replaced by mock writes or mock storage.
+
+The local peer listens only on 127.0.0.1 with an OS-assigned port. The method uses
+its normal SocketClient with proxies disabled; outputs are PRIVATE files in a
+new 0700 directory. Cases cover 2 MiB byte-for-byte success, zero bytes, truncated
+and extra data, stalled transfer-token cancellation, channel-token cancellation,
+and pre-cancellation. They check target/connection closure and settled file
+content. All seven cases passed; all three cancellation cases reported native
+G_IO_ERROR_CANCELLED. Per-case and process watchdogs bound a stuck test; only
+test-owned resources are cleaned up.
+
+Important: `_encryptClient` is a plaintext passthrough test adapter in this
+harness. These results cover the original packaged download method's TCP,
+length checking, new write helper and cleanup, **not TLS authentication, complete
+LAN initialization, pair management, cache-transaction integration, preferences
+GUI or two-machine clipboard behavior**. No real GSConnect service is launched.
