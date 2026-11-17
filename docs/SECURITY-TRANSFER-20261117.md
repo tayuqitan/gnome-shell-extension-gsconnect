@@ -65,5 +65,28 @@ resource patch against real peers in an appropriately isolated environment.
 New ZIP SHA256:
 `242e042da8308e649c4e151ef1238fae4610469acb633bb4dbc947764f8ddfa3`
 
-No new installed-extension activation, real network/TLS stall, full preferences
-UI or dual-machine test was performed. The package was not installed.
+At the package checkpoint above, no new installed-extension activation, real
+network/TLS stall, full preferences UI or dual-machine test was performed. The
+package was not installed.
+
+
+## Additional real loopback cancellation check
+
+`gjs -m installed-tests/gjs/testTransferSocketCancellation.js` passes three
+real GIO operations: pending accept, pending socket read, and TLS client handshake
+against a silent peer. A real parent Gio.Cancellable cancels the production linked
+token after 200 ms; each operation settles with G_IO_ERROR_CANCELLED. Cleanup uses
+the production helpers and verifies that all owned sockets are closed.
+
+The test binds only IPv4 127.0.0.1 with an OS-selected port, disables proxy use,
+and connects only to its own listener. Failure stops the test; there is no
+elevated retry or network-namespace workaround. A 12-second process watchdog
+limits a hung test. No certificates, paired-device records, desktop clipboard,
+GSConnect daemon, installation or system settings are accessed or changed.
+
+This is a real local TCP/TLS cancellation check, not a completed TLS handshake,
+TLS server-side validation, authenticated transfer, production LAN-method
+integration, blocked write/splice test, eight-peer load test, or two-machine
+acceptance. The mocked production-method regression remains complementary, not
+interchangeable. This test/doc-only follow-up does not change the packaged
+production code or the ZIP hash above.
