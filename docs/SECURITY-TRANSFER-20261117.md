@@ -253,3 +253,69 @@ certificate-mismatch policy is deliberately unchanged. There are no native TLS
 handshakes, certificates, default dconf access, real devices, network operations
 or production configuration changes in these tests. The unstable TLS diagnostic
 remains disabled and was not rerun.
+
+### Separate native-server fixture and its limited result
+
+A separate C/GIO server fixture was introduced to remove the GJS server-side
+certificate signal from the test. It uses only loopback, a dedicated test CA,
+REQUIRED client authentication with zero certificate errors and an exact client
+certificate match. The GJS client retains the extracted original packet methods
+and normal server verification. Each case has separate child processes, private
+temporary credentials, bounded lifetimes and supervised cleanup.
+
+Unlike the earlier prefix-only diagnostic, the native receiver requires TLS
+close-notify, reads until actual EOF, rejects more than 2 MiB (with a bounded
+one-extra-byte check), and reports total length and SHA256. The supervisor
+requires both process exits to be zero, no diagnostic stderr, and exact
+EXPECT/RESULT length/hash/EOF agreement. Normal small, Unicode and large cases
+were prepared; cancellation/backpressure was not part of this run. The C
+helper's reserved `silent` mode only pauses two seconds and is not proof of
+sustained backpressure.
+
+After independent static review, one authorized fail-fast run passed small and
+Unicode packets with the complete length/hash/EOF checks. The approximately
+2 MiB synthetic large-packet case then failed: GJS client exit -11 (SIGSEGV),
+native server exit 1, and no valid EXPECT or RESULT. The supervisor stopped,
+reaped its children and removed its temporary credential directories. No core
+or private-key contents were inspected, and the crash was not retried.
+
+This isolates away the GJS server callback but does not identify the crash site
+or prove a string-buffer root cause. The failing case has no stack or phase
+markers sufficient to prove that sendPacket/write_all was reached. Legacy text
+clipboard sends the full content inside JSON without a size cap in the audited
+component/plugin/device/channel chain, so similarly large control packets can
+be relevant. Rich file/image data instead uses separate payload streams; a
+large JSON test must not be equated with a large rich file transfer.
+
+The new runner and client remain explicitly opt-in and marked unvalidated with
+the large-packet crash warning. They are not default passing tests and must not
+be rerun without a separately reviewed plan. Production code and the released
+integrity-fixed ZIP have not been changed on the basis of this observation.
+
+### Offline single-splice packet candidate (not production)
+
+A test-only candidate in `installed-tests/fixtures/packetSpliceCandidate.js`
+serializes once, copies UTF-8 into owned GLib.Bytes, and submits one native
+output splice from a memory input. It closes only its own source after native
+completion, keeps the channel output open, uses the explicit or channel token,
+and preserves GIO's concurrent-operation PENDING rejection instead of adding a
+queue. Its success shape is `[byteCount]`, matching the local GJS promisified
+write_all result. Invalid completion counts reject with a GIO error.
+
+The 19 mocked Node cases cover serialization, UTF-8 byte counts, ownership,
+partial/invalid counts, submission/finish/cleanup failures, cancellation and
+pending-operation recovery. Nineteen real GJS cases use only memory outputs
+and private temporary files: empty/ASCII/Unicode/2 MiB full readback, explicit
+and default pre-cancellation, concurrent PENDING, closed-output failure and
+fresh-output recovery, and ordered ASCII/Unicode concatenation. One case uses
+the unchanged production Packet.serialize method text to check its timestamp,
+Unicode JSON and final newline without importing Core or invoking sendPacket.
+
+These are feasibility checks, not a production repair or a TLS-crash diagnosis.
+The candidate is not wired into Core.sendPacket or LAN identity writes; no
+installed extension, real pairing, TLS, network or old write_all path was used.
+Real mid-operation cancellation, authenticated TLS, socket backpressure and
+integration with all direct channel callers remain unverified. Passing memory
+and file checks does not prove that this candidate fixes the earlier crash or
+that legacy packet behavior is fully compatible. Production integration needs
+its own review and bounded verification plan.
