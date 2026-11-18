@@ -152,36 +152,46 @@ export default class RichClipboard {
         if (canPublish)
             this.send({op: 'clear'});
         if (types.some(type => FILE_TYPES.includes(type))) {
-            const mime = types.includes('text/uri-list') ? 'text/uri-list' : FILE_TYPES[1];
-            const bytes = await this.clipboard.readValue(mime);
-            const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
-            if (mime === FILE_TYPES[1])
-                lines.shift(); // Never propagate cut semantics across machines.
-            const uris = lines.filter(line => line && !line.startsWith('#'));
-            if (uris.length > MAX_FILES)
-                throw new Error('Clipboard has too many files');
-            for (const uri of uris) {
-                const file = Gio.File.new_for_uri(uri);
-                if (!uri.startsWith('file:///') || !file.is_native())
-                    throw new Error('Only local regular files can be copied');
-                const info = await file.query_info_async(
-                    'standard::type,standard::size,time::modified,standard::is-symlink,id::file',
-                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, null);
-                if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_is_symlink() ||
-                    info.get_size() > MAX_FILE_SIZE)
-                    throw new Error('Folders, symlinks and oversized files are not supported');
-                offer.files.push({file, name: file.get_basename(), size: info.get_size(),
-                    identity: info.get_attribute_string('id::file'),
-                    modified: info.get_attribute_uint64('time::modified')});
+            const ordinaryTypes = types.filter(type => !FILE_TYPES.includes(type));
+            try {
+                const mime = types.includes('text/uri-list') ? 'text/uri-list' : FILE_TYPES[1];
+                const bytes = await this.clipboard.readValue(mime);
+                const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
+                if (mime === FILE_TYPES[1])
+                    lines.shift(); // Never propagate cut semantics across machines.
+                const uris = lines.filter(line => line && !line.startsWith('#'));
+                if (uris.length > MAX_FILES)
+                    throw new Error('Clipboard has too many files');
+                for (const uri of uris) {
+                    const file = Gio.File.new_for_uri(uri);
+                    if (!uri.startsWith('file:///') || !file.is_native())
+                        throw new Error('Only local regular files can be copied');
+                    const info = await file.query_info_async(
+                        'standard::type,standard::size,time::modified,standard::is-symlink,id::file',
+                        Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, null);
+                    if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_is_symlink() ||
+                        info.get_size() > MAX_FILE_SIZE)
+                        throw new Error('Folders, symlinks and oversized files are not supported');
+                    offer.files.push({file, name: file.get_basename(), size: info.get_size(),
+                        identity: info.get_attribute_string('id::file'),
+                        modified: info.get_attribute_uint64('time::modified')});
+                }
+            } catch (error) {
+                // Invalid URI companions must not suppress ordinary formats.
+                // Never expose unvalidated URIs through an ordinary provider.
+                if (!ordinaryTypes.length)
+                    throw error;
+                offer.files = [];
             }
-            offer.types = FILE_TYPES;
+            offer.types = offer.files.length ? [...new Set(types)]
+                : ordinaryTypes;
         }
         const snapshots = new Map();
         let remaining = this.history.maxBytes;
         const sensitive = this.clipboard.mimetypes.some(type =>
             /password|secret|sensitive/i.test(type));
-        if (this.history.maxItems && !offer.files.length && !sensitive) {
-            for (const mime of offer.types) {
+        if (this.history.maxItems && !sensitive) {
+            for (const mime of offer.types.filter(type => !FILE_TYPES.includes(type))) {
                 if (remaining <= 0)
                     break;
                 try {
@@ -260,7 +270,7 @@ export default class RichClipboard {
                 ![...file.name].some(char => char.charCodeAt(0) < 32 || '/\\'.includes(char)) && Number.isSafeInteger(file.size) &&
                 file.size >= 0 && file.size <= MAX_FILE_SIZE))
             return;
-        if (body.types.some(type => FILE_TYPES.includes(type)) && !body.files.length)
+        if (body.types.some(type => FILE_TYPES.includes(type)) !== (body.files.length > 0))
             return;
         if (body.sensitive)
             this.history.remove(`remote:${body.id}`);
@@ -295,6 +305,26 @@ export default class RichClipboard {
             remote.receiveToken = GLib.uuid_string_random();
             remote.receiveGeneration = this.clipboard.generation;
             remote.clipboardId = `received-${remote.receiveToken}`;
+            const ordinaryTypes = remote.types.filter(type => !FILE_TYPES.includes(type));
+            if (ordinaryTypes.length) {
+                remote.previewId = `preview-${remote.receiveToken}`;
+                remote.preview = (async () => {
+                    try {
+                        await this.clipboard.offer(remote.previewId, ordinaryTypes,
+                            (mime, cancellable) => this.request(remote, {mime}, null, cancellable),
+                            this.timeoutSeconds);
+                        if (this.remote !== remote ||
+                            !await this.clipboard.isCurrentOffer(remote.previewId) ||
+                            this.remote !== remote)
+                            throw new Error('Clipboard preview was replaced');
+                        remote.receiveGeneration = this.clipboard.generation;
+                    } catch (error) {
+                        await this.clipboard.clearOffer(remote.previewId).catch(debug);
+                        throw error;
+                    }
+                })();
+                await remote.preview;
+            }
             this.notify({
                 id: 'clipboard-files-ready', title: _('Remote files available'),
                 body: `${remote.files.length} 个文件待接收。先接收完成，再在目标应用按 Ctrl+V。`,
@@ -330,7 +360,7 @@ export default class RichClipboard {
         if (remote.receiving)
             return remote.receiving;
         remote.authorized = true;
-        if (!this.fileReceiveCurrent(remote)) {
+        if (!this.fileReceiveCurrent(remote, !remote.previewId)) {
             remote.authorized = false;
             return Promise.reject(new Error('接收已取消：设备、剪贴板或接收权限已改变'));
         }
@@ -342,6 +372,13 @@ export default class RichClipboard {
                 return GLib.SOURCE_REMOVE;
             });
         remote.receiving = Promise.resolve().then(async () => {
+            if (remote.previewId) {
+                await remote.preview;
+                if (!await this.clipboard.isCurrentOffer(remote.previewId) ||
+                    !this.fileReceiveCurrent(remote, false))
+                    throw new Error('接收已取消：预览剪贴板已改变');
+                remote.receiveGeneration = this.clipboard.generation;
+            }
             const uris = await this.getFiles(remote);
             if (!this.fileReceiveCurrent(remote))
                 throw new Error('接收已取消，未更改剪贴板');
@@ -349,8 +386,10 @@ export default class RichClipboard {
             const values = new Map(FILE_TYPES.map(mime => [mime, new TextEncoder().encode(
                 mime === FILE_TYPES[1] ? `copy\n${uris.join('\n')}` : `${uris.join('\r\n')}\r\n`)]));
             try {
-                const publication = this.clipboard.offer(remote.clipboardId, FILE_TYPES,
-                    mime => values.get(mime).slice(), this.timeoutSeconds);
+                const publicationTypes = remote.types;
+                const publication = this.clipboard.offer(remote.clipboardId, publicationTypes,
+                    (mime, cancellable) => values.has(mime) ? values.get(mime).slice()
+                        : this.request(remote, {mime}, null, cancellable), this.timeoutSeconds);
                 remote.receiveGeneration = this.clipboard.generation;
                 await publication;
                 if (!await this.clipboard.isCurrentOffer(remote.clipboardId) ||
@@ -365,6 +404,8 @@ export default class RichClipboard {
                 }
                 throw error;
             }
+            remote.previewId = null;
+            remote.preview = null;
             this.notify({id: 'clipboard-files-ready',
                 title: '文件已接收', body: '已准备好本地文件，请在目标应用按 Ctrl+V。',
                 icon: new Gio.ThemedIcon({name: 'edit-paste-symbolic'})});
@@ -408,7 +449,8 @@ export default class RichClipboard {
         const activation = ++this.historyActivation;
         const generation = this.clipboard.generation;
         const files = entry.offer.files;
-        if (entry.direction === 'remote' && !entry.uris && entry.values.size === 0) {
+        if (entry.direction === 'remote' && !entry.uris &&
+            (entry.offer.files.length || entry.values.size === 0)) {
             if (!this.plugin.settings.get_boolean('receive-content'))
                 throw new Error('已关闭接收剪贴板，请先启用接收后再恢复此未缓存记录');
             if (!this.enabled || !this.device.connected)
@@ -436,9 +478,12 @@ export default class RichClipboard {
                     throw new Error('历史文件已修改或被替换，请重新复制');
                 uris.push(file.get_uri());
             }
-            types = FILE_TYPES;
-            provider = mime => new TextEncoder().encode(mime === FILE_TYPES[1]
-                ? `copy\n${uris.join('\n')}` : `${uris.join('\r\n')}\r\n`);
+            types = entry.offer.types.filter(type =>
+                FILE_TYPES.includes(type) || entry.values.has(type));
+            provider = mime => FILE_TYPES.includes(mime)
+                ? new TextEncoder().encode(mime === FILE_TYPES[1]
+                    ? `copy\n${uris.join('\n')}` : `${uris.join('\r\n')}\r\n`)
+                : entry.values.get(mime).slice();
         } else {
             types = [...entry.values.keys()];
             if (!types.length)
@@ -461,8 +506,9 @@ export default class RichClipboard {
     request(remote, detail, file = null, cancellable = null) {
         return new Promise((resolve, reject) => {
             if (this.remote !== remote || cancellable?.is_cancelled() ||
-                ((Number.isInteger(detail.index) || remote.files.length) &&
-                (!Number.isInteger(detail.index) || !this.fileReceiveCurrent(remote))))
+                (Number.isInteger(detail.index) ? detail.index < 0 ||
+                    detail.index >= remote.files.length || !this.fileReceiveCurrent(remote)
+                    : FILE_TYPES.includes(detail.mime) || !remote.types.includes(detail.mime)))
                 return reject(new Error('Clipboard offer expired'));
             const request = GLib.uuid_string_random();
             const pending = {remote, detail, file, resolve, reject, transfer: null,
@@ -702,7 +748,7 @@ export default class RichClipboard {
                 }
                 transfer.addStream(packet, stream, item.size);
             } else {
-                if (offer.files.length || !offer.types.includes(body.mime))
+                if (FILE_TYPES.includes(body.mime) || !offer.types.includes(body.mime))
                     throw new Error('Invalid clipboard format');
                 let bytes = null;
                 if (retained() && archive.values.has(body.mime))
@@ -835,8 +881,11 @@ export default class RichClipboard {
                 debug(error);
             }
         }
-        if (this.remote)
+        if (this.remote) {
             this.clipboard.clearOffer(this.remote.clipboardId || this.remote.id).catch(debug);
+            if (this.remote.previewId)
+                this.clipboard.clearOffer(this.remote.previewId).catch(debug);
+        }
         this.remote = null;
         for (const [request, pending] of this.pending) {
             pending.transfer?.cancel();

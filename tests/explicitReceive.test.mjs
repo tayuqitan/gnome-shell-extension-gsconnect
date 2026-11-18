@@ -431,3 +431,118 @@ test('same-tick history receive actions share acceptance before its await resume
     assert.equal(f.timers.size, 0);
     f.rich.destroy();
 });
+
+test('mixed offer previews ordinary MIME without file authorization and retains it after receive', async () => {
+    const f = fixture();
+    const html = new TextEncoder().encode('<b>synthetic</b>');
+    const originalRequest = f.rich.request.bind(f.rich);
+    let ordinaryReads = 0;
+    f.rich.request = (remote, detail, file, token) => {
+        if (detail.mime === 'text/html') { ordinaryReads++; return Promise.resolve(html.slice()); }
+        return originalRequest(remote, detail, file, token);
+    };
+    await f.rich.accept(body({types: [...fileTypes, 'text/html', 'text/plain']}));
+    assert.deepEqual(Array.from(f.publications[0].types), ['text/html', 'text/plain']);
+    assert.equal(f.downloads.length, 0);
+    assert.deepEqual(await f.publications[0].provider('text/html'), html);
+    await assert.rejects(originalRequest(f.rich.remote, {index: 0}, {}));
+    await assert.rejects(originalRequest(f.rich.remote, {mime: 'text/uri-list'}));
+    assert.equal(f.packets.length, 0);
+    f.clipboard.generation++; // Late own OwnerChange; identity is still the preview.
+    const receiving = f.rich.receiveFiles(f.rich.remote.receiveToken);
+    assert.equal(f.rich.receiveFiles(f.rich.remote.receiveToken), receiving);
+    await tick();
+    assert.equal(f.downloads.length, 1);
+    f.complete(); await receiving;
+    const published = f.publications.at(-1);
+    assert.ok(published.types.includes('text/html'));
+    assert.ok(published.types.includes('text/uri-list'));
+    assert.deepEqual(await published.provider('text/html'), html);
+    assert.match(new TextDecoder().decode(await published.provider('text/uri-list')), /^file:\/\/\/synthetic-cache/);
+    assert.equal(f.downloads.length, 1);
+    assert.equal(ordinaryReads, 2);
+    f.rich.destroy();
+});
+
+test('replaced mixed preview cannot authorize file receive despite generation refresh', async () => {
+    const f = fixture();
+    await f.rich.accept(body({types: [...fileTypes, 'text/html']}));
+    f.clipboard.currentOfferId = 'new-user-copy'; f.clipboard.generation++;
+    await assert.rejects(f.rich.receiveFiles(f.rich.remote.receiveToken), /取消/);
+    assert.equal(f.downloads.length, 0);
+    assert.equal(f.clipboard.currentOfferId, 'new-user-copy');
+    f.rich.destroy();
+});
+
+test('cancel during mixed preview ownership check prevents any file download', async () => {
+    const f = fixture();
+    await f.rich.accept(body({types: [...fileTypes, 'text/html']}));
+    let finish;
+    f.clipboard.isCurrentOffer = () => new Promise(resolve => { finish = resolve; });
+    const pending = f.rich.receiveFiles(f.rich.remote.receiveToken);
+    await tick();
+    f.rich.cancelDownload(f.rich.remote.receiveToken);
+    finish(true);
+    await assert.rejects(pending, /取消/);
+    assert.equal(f.downloads.length, 0);
+    f.rich.destroy();
+});
+
+test('superseded preview completion cannot clear newer preview', async () => {
+    const f = fixture();
+    const original = f.clipboard.offer.bind(f.clipboard);
+    let release;
+    let first = true;
+    f.clipboard.offer = async (...args) => {
+        await original(...args);
+        if (first) { first = false; await new Promise(resolve => { release = resolve; }); }
+    };
+    const older = f.rich.accept(body({types: [...fileTypes, 'text/html']}));
+    const failed = assert.rejects(older, /replaced/);
+    await tick();
+    await f.rich.accept(body({id: 'newer', revision: 2, types: [...fileTypes, 'text/html']}));
+    const newerId = f.rich.remote.previewId;
+    release(); await failed;
+    assert.equal(f.clipboard.currentOfferId, newerId);
+    assert.equal(f.downloads.length, 0);
+    f.rich.destroy();
+});
+
+test('mixed history with cached HTML but no files still stages explicit receive', async () => {
+    const f = fixture();
+    await f.rich.accept(body({types: [...fileTypes, 'text/html']}));
+    const entry = f.rich.history.get('remote:remote-one');
+    entry.values.set('text/html', new TextEncoder().encode('<b>cached</b>'));
+    await f.rich.activateHistory(entry);
+    assert.equal(f.downloads.length, 0);
+    assert.deepEqual(Array.from(f.publications.at(-1).types), ['text/html']);
+    f.rich.destroy();
+});
+
+test('64 MIME mixed offer does not grow beyond protocol or provider limit', async () => {
+    const f = fixture();
+    const types = ['text/uri-list', ...Array.from({length: 63}, (_, i) => `application/x-fixture-${i}`)];
+    await f.rich.accept(body({types}));
+    assert.equal(f.publications[0].types.length, 63);
+    const receiving = f.rich.receiveFiles(f.rich.remote.receiveToken);
+    await tick(); f.complete(); await receiving;
+    assert.equal(f.publications.at(-1).types.length, 64);
+    assert.deepEqual(Array.from(f.publications.at(-1).types), types);
+    f.rich.destroy();
+});
+for (const reason of ['disconnect', 'permission']) {
+    test(`mixed ownership check cannot authorize after ${reason}`, async () => {
+        const f = fixture();
+        await f.rich.accept(body({types: [...fileTypes, 'text/html']}));
+        let finish;
+        f.clipboard.isCurrentOffer = () => new Promise(resolve => { finish = resolve; });
+        const pending = f.rich.receiveFiles(f.rich.remote.receiveToken);
+        await tick();
+        if (reason === 'disconnect') f.device.connected = false;
+        else f.values['receive-content'] = false;
+        finish(true);
+        await assert.rejects(pending, /取消/);
+        assert.equal(f.downloads.length, 0);
+        f.rich.destroy();
+    });
+}

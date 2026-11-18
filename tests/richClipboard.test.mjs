@@ -692,3 +692,51 @@ for (const changed of [{revision: 2}, {origin: 'other-peer'}]) {
         assert.equal(r.transfers.length, 0);
     });
 }
+
+test('non-local URI companion does not suppress ordinary text and HTML', async () => {
+    const r = await rig();
+    r.clipboard.mimetypes = ['text/uri-list', 'text/plain', 'text/html'];
+    r.values.set('text/uri-list', new TextEncoder().encode('https://example.invalid/item\r\n'));
+    r.values.set('text/plain', new TextEncoder().encode('ordinary text'));
+    r.values.set('text/html', new TextEncoder().encode('<b>ordinary text</b>'));
+    globalThis.__richClipboardTestMocks.Gio.File.new_for_uri = () => ({is_native: () => false});
+    await r.helper.publish();
+    assert.deepEqual(r.sent.at(-1).body.types, ['text/plain', 'text/html']);
+    assert.deepEqual(r.sent.at(-1).body.files, []);
+});
+
+test('local file offer retains companion text and HTML metadata', async () => {
+    const r = await rig();
+    r.clipboard.mimetypes = ['text/uri-list', 'text/plain', 'text/html',
+        ...Array.from({length: 61}, (_, i) => `application/x-extra-${i}`)];
+    r.values.set('text/uri-list', new TextEncoder().encode('file:///synthetic/file.txt\r\n'));
+    r.values.set('text/plain', new TextEncoder().encode('label'));
+    r.values.set('text/html', new TextEncoder().encode('<b>label</b>'));
+    globalThis.__richClipboardTestMocks.Gio.File.new_for_uri = () => ({is_native: () => true,
+        get_basename: () => 'file.txt', query_info_async: async () => ({
+            get_file_type: () => 1, get_is_symlink: () => false, get_size: () => 3,
+            get_attribute_string: () => 'synthetic-id', get_attribute_uint64: () => 1})});
+    await r.helper.publish();
+    assert.equal(r.sent.at(-1).body.types.length, 64);
+    assert.ok(r.sent.at(-1).body.types.includes('text/plain'));
+    assert.ok(r.sent.at(-1).body.types.includes('text/html'));
+    assert.equal(r.sent.at(-1).body.files.length, 1);
+    await r.helper.serve({id: r.helper.local.id, request: 'mixed-html', mime: 'text/html'});
+    assert.equal(r.transfers[0].started, true);
+    assert.deepEqual(r.transfers[0].item.stream.value, r.values.get('text/html'));
+});
+
+test('mixed local history restores both validated file URI and cached HTML', async () => {
+    const r = await rig();
+    const html = new TextEncoder().encode('<b>retained</b>');
+    const file = {is_native: () => true, get_uri: () => 'file:///synthetic/retained.txt',
+        async query_info_async() { return {get_file_type: () => 1, get_is_symlink: () => false,
+            get_size: () => 3, get_attribute_string: () => 'same-file', get_attribute_uint64: () => 10}; }};
+    const entry = r.helper.history.addLocal({id: 'mixed-history', types: ['text/uri-list', 'text/html'],
+        files: [{file, name: 'retained.txt', size: 3, identity: 'same-file', modified: 10}]},
+    new Map([['text/html', html]]));
+    await r.helper.activateHistory(entry);
+    assert.deepEqual(r.offered[0][1], ['text/uri-list', 'text/html']);
+    assert.deepEqual(r.offered[0][2]('text/html'), html);
+    assert.match(new TextDecoder().decode(r.offered[0][2]('text/uri-list')), /synthetic\/retained/);
+});

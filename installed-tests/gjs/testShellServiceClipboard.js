@@ -262,6 +262,10 @@ async function serviceIntegration(options, portal) {
         rich.remoteReady = true;
         let writes = 0;
         rich.request = (remote, detail, file, cancellable) => {
+            if (detail.mime) {
+                assert(detail.mime === 'text/html', 'Only synthetic HTML preview expected');
+                return Promise.resolve(new TextEncoder().encode('<b>private synthetic file</b>'));
+            }
             assert(rich.fileReceiveCurrent(remote) && !cancellable.is_cancelled(),
                 'Synthetic transport requires explicit receive authority');
             assert(detail.index === 0, 'Only synthetic fixture file expected');
@@ -270,9 +274,16 @@ async function serviceIntegration(options, portal) {
             return Promise.resolve();
         };
         await rich.accept({id: 'private-source', revision: 1, origin: 'private-peer',
-            types: ['text/uri-list'], files: [{name: 'fixture.txt', size: 22}]});
-        assert(writes === 0 && (await portal('GetOffer')).deepUnpack()[0] === '',
-            'Metadata must not publish or download');
+            types: ['text/uri-list', 'text/html'], files: [{name: 'fixture.txt', size: 22}]});
+        assert(writes === 0 && (await portal('GetOffer')).deepUnpack()[0] === rich.remote.previewId,
+            'Metadata publishes only the ordinary preview, never file payload');
+        const formats = (await portal('GetMimetypes')).deepUnpack()[0];
+        assert(formats.includes('text/html') && !formats.includes('text/uri-list'),
+            'Only ordinary MIME available before explicit receiving');
+        const preview = (await portal('GetValue', new GLib.Variant('(s)', ['text/html'])))
+            .deepUnpack()[0];
+        assert(new TextDecoder().decode(preview) === '<b>private synthetic file</b>' && writes === 0,
+            'HTML preview does not download files');
         await rich.receiveFiles(rich.remote.receiveToken);
         assert(writes === 1 && await clipboard.isCurrentOffer(rich.remote.clipboardId),
             'Complete receive publishes through actual service/Shell ownership');
@@ -285,6 +296,10 @@ async function serviceIntegration(options, portal) {
             assert(new TextDecoder().decode(data) === 'private synthetic file', 'Exact cached bytes');
         }
         assert(writes === 1, 'Native reads must never refetch file payload');
+        const retainedHtml = (await portal('GetValue', new GLib.Variant('(s)', ['text/html'])))
+            .deepUnpack()[0];
+        assert(new TextDecoder().decode(retainedHtml) === '<b>private synthetic file</b>',
+            'Explicit file completion retains companion HTML');
         assert(notices.some(notice => notice.title === '文件已接收'), 'Receive completion feedback');
         print('PASS real service + Shell: explicit receive, cached URI, repeated native reads');
         const oldId = rich.remote.clipboardId;

@@ -886,3 +886,41 @@ Shell 的唯一 D-Bus owner、扩展实际路径/ACTIVE 状态和 portal owner�
 transport timeout。仍不能声称取消立即中断原生/D-Bus操作、恶意同 UID 隔离、
 物理键盘/文件管理器或真实双机桌面验收；缓存文件可能已接收完成但不再发布，
 本轮也没有将“取消”解释为保证删除所有已接收缓存文件。
+
+## 2026-11-18：修复 URI 伴随格式吞掉普通 MIME 的兼容缺陷
+
+先用合成单测确认旧代码两个失败：网络 URI＋text/plain＋text/html 的 publish
+直接抛错；本地普通文件＋text/plain＋text/html 的 publish 强制改为纯文件 MIME。
+实际问题跨越 publish、accept、request、serve 及历史恢复，不只是 MIME 列表。
+
+修复内容：
+- 有效本地文件保留原声明的普通 MIME；文件/URI 元数据解析失败时，仅在有
+  其他普通 MIME 的情况下舍弃 URI 表示，不让它压掉文字/HTML等。
+- 接收 mixed offer 时，以独立随机 previewId 只发布普通 MIME。先完成真实
+  所有权校验；文件按钮再次核验 preview ID、当前 remote/连接/权限/取消状态，
+  才刷新 generation 并开始文件事务。自身 OwnerChange 不被误认成新授权来源。
+- 未授权 file index 以及原始文件 MIME 的普通字节请求仍拒绝。serve 允许
+  mixed 中的普通 MIME，不允许借普通路径取得原始文件 URI。
+- 文件完成后，receivedId 发布本地缓存 URI与普通 MIME；普通 provider 不会
+  重新发起文件传输。预览/接收两个本地唯一 ID 按 ID 清理，旧预览不能删新 offer。
+- mixed 本地历史保存普通快照，不保存原始 URI 字节；文件未缓存不能因存在
+  HTML 值被误判已缓存；已有有效文件/普通快照的历史恢复保留两类格式。
+
+独立审查找到并修正 64 MIME 边界：不得自动补第二个文件 MIME 导致 65 项。
+发送、最终发布、历史按原声明格式保留，输入的文件标志与 files 非空必须一致。
+新增回归包括 64 项发送/接收边界、混合预览前后 HTML、未授权文件请求、
+自身 generation 变化、外部替换、await 期间取消/断线/撤权、迟到旧预览、
+有 HTML 但无文件缓存的历史、混合历史恢复。
+
+最终 Node **322/322**。两 VM 各 **7 组私有真实 Shell/服务集成**通过，其中
+显式接收场景改为真正 HTML＋文件混合：接收前 native 只能看到 HTML、文件写入0；
+完成后 native 可读取 HTML 与精确本地缓存文件，重复文件 URI 读取不增加下载。
+原延迟 Offer/GetOffer 交错保护保持通过。两机原 GJS 通知/内存双实例 **14/14**
+也通过；临时目录/私有进程组清理已核验。
+最终包 SHA-256：`f12bd643ef8e21891928cb9b7a3a2ddb19b43e0ca0f20adced994e75483032a6`。
+Shell 集成脚本 SHA-256：`250b62cf9a9913098e6cbcdd601a5ebf871a0fa68b9a90e233c8634de9d50317`。
+
+范围限制：没有放开 `files=[] + text/uri-list`，因此不能夹带对端本地 file URI
+绕过显式接收。URI-only 的非本地 URL 仍不支持；不对已有 HTML/文本内容作净化。
+未缓存文件但已有 HTML 的混合历史仍要求源在线，没有新增离线仅恢复文字模式。
+不触真实剪贴板/配对，不改网络；本轮不是完整真实双机或用户桌面验收。
