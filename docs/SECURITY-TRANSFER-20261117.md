@@ -696,3 +696,49 @@ Node 回归仍为 308/308，测试脚本 ESLint 与 diff check 通过。
 这不是两台虚拟机之间的真实传输：每台独立运行相同单进程模拟闭环。
 尚未覆盖 TLS/真实 Transfer 适配器、发现/配对、通知中心显示、真实桌面粘贴、
 服务初始化或进程崩溃恢复。现有 NAT 与 SSH 未修改，没有访问真实配对或剪贴板。
+
+## 2026-11-18：生产下载方法的独立回环 TLS 验证
+
+新增 `testPackagedRichDownloadTls.js` 与 `runPackagedRichDownloadTls.py`。
+两台 RHEL 10.2 VM 分别连续执行两轮，**每轮 7/7，通过共 28 个场景**。
+使用哈希锁定的原 `lan.download` 方法与原 `copyExact/writeBytes/transferCancellation`，
+不导入 LAN 服务、设备设置或配对。Python `ssl` 服务端与 GJS 下载客户端分进程运行。
+
+覆盖：2 MiB 完整文件、零长度、少 1 字节、额外 1 字节、操作 token 取消、
+通道 token 取消、连接前取消。逐字节验证合成内容，并对成功文件断言固定 SHA-256：
+`7e879fcd2433cef4a0888eee46fbbb05240f594b89e5052faf491c44888cb0ed`。
+错误大小均拒绝；3 种取消均得到原生 CANCELLED；连接前取消未开始客户端连接；
+检查文件和连接关闭、结算后无晚写入/内容改变。失败文件只存在于私有测试目录并被删除。
+
+隔离与认证：
+- Python AF_INET listener 显式绑定 `127.0.0.1:0`，读取实际 `getsockname()`
+  断言回环；接受连接的本地/远端地址以及 GJS 客户端远端地址均断言回环。
+- 每轮生成一次性 CA 与分角色 serverAuth/clientAuth 证书，私钥权限 0600；
+  OpenSSL 验证用途，TLS 两端使用该临时 CA，并额外比较预期对端叶证书。
+  没有无条件接受证书、忽略验证错误或修改系统信任库。
+- 空 HOME/XDG、无桌面/会话总线地址、memory settings、core=0、子进程超时，
+  上传哈希回读和解压防穿越均保留。每轮结束清理证书、源/目标文件及目录，
+  并核验目录不存在；服务端线程已停止、listener 已关闭。
+
+复现接口：在 `.gsconnect-tls-check.<随机字符>` 私有目录准备 `home/`、
+`certs/{ca,server,client}.pem` 及相应私钥（只用新生成的测试证书），
+并将同目录的两个脚本放在一起；空环境设 `HOME=$PWD/home`、`TMPDIR=$PWD`，
+执行 `python3 runPackagedRichDownloadTls.py <已核验解压包绝对路径>`。
+现有 `runPackagedCoreTls.certificates()` 可生成分角色证书，叶 PEM 后附临时 CA PEM。
+外层调用者负责临时目录清理，不能提供真实证书或真实 HOME。
+测试包 SHA-256 仍为 `9faf62e3bbefe868a7ebac93a16a5c386a7f7e6d84eef62739bc9aa8ff985089`。
+最终 JS SHA-256：`626c3da898de4f2f59f036ea43713d5c005b47788775104348a8174c223b4874`。
+最终 Python SHA-256：`bb62d9671381fced205ff8f0bd90509c790ad9066a22726b69e9e99c3ab0fc7f`。
+
+诊断记录与边界：最初将 TLS 两端置于同一 GJS 进程时曾完成两机 7/7，
+但后续在取消和零长度场景间歇出现无栈 `too much recursion`；单场景分进程仍出现。
+没有据此修改生产代码，也没有确认其根因。最终将服务端移到独立 Python ssl 后，
+上述两机各两轮未再出现。该改动消除了夹具同进程双端变量，不证明已修复 GJS 问题。
+GIO 服务端对有效客户端证书也要求显式接受回调，初版缺少该回调导致认证失败；
+该语义见 [GIO 官方说明](https://docs.gtk.org/gio/signal.TlsConnection.accept-certificate.html)。
+最终 Python 服务端使用原生 CA 校验与 pin，不依赖这一 GJS 回调。
+
+本轮**不覆盖**生产 `_uploadRich` 通配地址监听、生产 `_authenticate`/配对、
+完整 Core.Transfer、真实发现、双机传输、通知中心或桌面粘贴。
+不改变 NAT/SSH，不触碰真实配对和剪贴板。发布/ownership D-Bus 已在途时的
+取消不能立即中断，返回或超时后唯一 ID 尽力清理仍属既有边界，不是本轮证实的缺陷。
