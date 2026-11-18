@@ -815,3 +815,47 @@ Runner SHA-256：`b2a961c2c90e4ed57e7743296e8af83e6e1043d9cb17765c8294c7d666b1e8
 更不是生产 TLS 取消修复。** 前一个提交保留原顶层 await 复现入口和失败记录；
 最小诊断源/runner（不含证书、私钥、真实设备数据）另有本地归档保留。
 仍未覆盖真实控制通道、发现/配对、跨 VM 传输及桌面粘贴。
+
+## 2026-11-18：私有真实 GNOME Shell 与生产服务组件集成
+
+新增 `testShellServiceClipboard.js`。两台 RHEL 10.2 VM 分别在新建的私有
+headless GNOME Shell 内通过 **5 组场景**，不是对真实用户桌面的测试：
+1. 原 Shell/native bridge 随机 MIME 二进制异步读取，逐字节一致。
+2. 合成 provider 错误返回真实 portal/native 错误，而非将超时视为通过。
+3. 清除 pending offer 后返回真实 ownership cancellation 错误。
+4. 原服务 Clipboard + RichClipboard 显式接收合成文件，实际走私有
+   D-Bus、原 Shell portal、原 native helper、Mutter 选择区与本地缓存 URI。
+   元数据不下载/不发布，接收完成后才发布；真实 native 两次读取返回相同
+   私有缓存文件，文件内容正确，合成文件请求计数仍为 1。
+5. 新 offer 替换后，原服务 `clearOffer(oldId)` 不删除新 offer；真实 native
+   仍可读取新合成内容。**这里只验证顺序保护，不是在途 publication 取消竞态。**
+
+Shell 启动：`--headless --wayland --no-x11 --virtual-monitor 1024x768`。
+环境不转发真实 DISPLAY、Wayland socket、Xauthority 或用户总线；私有
+HOME/XDG/runtime，Wayland socket 为该临时 runtime 内的 `gsconnect-fixture`。
+私有 session bus 与模拟 system bus 均无 service directory、无自动激活服务。
+临时 keyfile GSettings 只启用该临时目录内的扩展副本。
+
+临时 extension.js 是最小安全入口，只调用原 `Clipboard.watchService()` 与
+`unwatchService()`。不加载完整 extension 的 Setup/installService、设备管理器
+或 daemon；临时副本 daemon 被拒绝执行桩替换，作为额外防护。客户端先核验
+Shell 的唯一 D-Bus owner、扩展实际路径/ACTIVE 状态和 portal owner，再申请
+私有模拟 GSConnect 名称。服务组件仅在该私有会话运行，Gio.Application 只设
+进程内 default、不注册；网络边缘是内存 packet 记录与合成文件写入，没有发现
+或配对。Gtk fallback 即使触发，也只能连接本轮私有 compositor。
+
+测试包 SHA-256：`609d3bda37439cbb4dc54b357eb693b3b4d0f6fc95aeecd171ea3e69006cead8`。
+测试脚本 SHA-256：`320ba441aec538a6fd36d417df373e8e89d4b881a744b2051d04318f5410628f`。
+上传哈希回读、解压防穿越、core=0、Shell/client 限时及创建的进程组收束保留。
+两机均 exit 0、无隐藏服务错误；私有 Shell/两条 bus 已停止，临时目录删除且
+核验不存在。没有保存或读取真实用户剪贴板/配对数据，NAT 与 SSH 未改。
+
+仍未覆盖完整原 extension/daemon 启动、真实通知中心交互、物理 Ctrl+V、
+用户实际桌面、真实网络收发或双机传输；本轮原服务/真实 Shell 之间的数据链
+使用合成传输边缘，不能宣称已完成最终桌面验收。
+
+独立审查后进一步收紧：客户端要求 session/system bus 精确等于本轮目录的
+两个 socket；服务组件销毁后继续检查隐藏错误。GJS client 也加入创建的独立
+进程组列表，最终两机均断言四个组（Shell、两个bus、client）已不存在。
+这些改动后最终两机再各 5 组通过。不包含可选 60 秒 native deadline 场景。
+这里是私有会话隔离，不是 OS 网络 namespace 或恶意同 UID 安全边界。
