@@ -227,3 +227,38 @@ test('GI InputCapabilities name handles composite device without legacy type fal
     assert.equal(f.gate.allows(f.source()), true);
     f.gate.destroy();
 });
+
+for (const reason of ['mode', 'lock', 'focus', 'source', 'api']) {
+    test(`observing ${reason} at read time permanently revokes the lease without a signal`, () => {
+        const f = fixture();
+        f.gate._filter(f.own);
+        const getSource = f.gate._getSource;
+        if (reason === 'mode') f.Main.actionMode = 2;
+        if (reason === 'lock') f.sessionMode.isLocked = true;
+        if (reason === 'focus') f.display.focus_window = {};
+        if (reason === 'source') f.gate._getSource = () => ({});
+        if (reason === 'api') f.gate._getSource = () => { throw new Error('unavailable'); };
+        assert.equal(f.gate.allows(f.source()), false);
+        f.Main.actionMode = 1;
+        f.sessionMode.isLocked = false;
+        f.display.focus_window = f.window;
+        f.gate._getSource = getSource;
+        assert.equal(f.gate.allows(f.source()), false);
+        f.gate._filter(f.own);
+        assert.equal(f.gate.allows(f.source()), true);
+        f.gate.destroy();
+    });
+}
+
+test('disconnect failure cannot retain a revoked lease or escape the read callback', () => {
+    const f = fixture();
+    f.gate._filter(f.own);
+    f.window.disconnect = () => { throw new Error('window gone'); };
+    f.Main.actionMode = 2;
+    assert.equal(f.gate.allows(f.source()), false);
+    assert.equal(f.gate._windowId, 0);
+    assert.equal(f.gate._focus, null);
+    f.Main.actionMode = 1;
+    assert.equal(f.gate.allows(f.source()), false);
+    f.gate.destroy();
+});

@@ -409,3 +409,31 @@ test('joined gate/portal does not authenticate readers during the shared multi-r
         assert.deepEqual(r.signals.map(([, , id]) => id), ['intended-reader', 'racing-preview']);
     } finally { r.portal.destroy(); }
 });
+
+for (const reason of ['focus', 'api']) {
+    test(`joined gate read-time ${reason} failure rejects files without hurting image reads`, () => {
+        const r = fixture({experimental: true, realGate: true});
+        try {
+            r.portal.Offer('mixed', [...fileMimes, 'image/png']); r.desktop.press();
+            const gate = r.portal._pasteGate;
+            const getSource = gate._getSource;
+            if (reason === 'focus') r.desktop.display.focus_window = {};
+            if (reason === 'api') gate._getSource = () => { throw new Error('unavailable'); };
+            const source = r.sources[0];
+            source.emit('request', 'invalid', fileMimes[0]);
+            assert.equal(r.signals.length, 0);
+            assert.equal(source.resolutions.length, 1);
+            assert.equal(source.resolutions[0][1], null);
+            assert.match(source.resolutions[0][2], /Ctrl\+V/);
+            r.desktop.display.focus_window = r.desktop.window;
+            gate._getSource = getSource;
+            source.emit('request', 'restored-without-gesture', fileMimes[1]);
+            assert.equal(r.signals.length, 0);
+            assert.equal(source.resolutions.length, 2);
+            source.emit('request', 'image', 'image/png');
+            assert.deepEqual(r.signals, [['ValueRequested', 'mixed', 'image', 'image/png']]);
+            r.desktop.press(); source.emit('request', 'fresh-gesture', fileMimes[0]);
+            assert.equal(r.signals.length, 2);
+        } finally { r.portal.destroy(); }
+    });
+}

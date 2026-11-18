@@ -542,3 +542,17 @@ Host Node regression: 206 tests passed, zero failed/skipped. These component
 results do not prove real Mutter keybinding propagation, GNOME application paste,
 clipboard-manager behavior, or the user's strict Ctrl+V trigger requirement.
 The experimental setting and production code are unchanged.
+
+### Read-time lease revocation hardening (2026-11-18)
+
+A denied `allows()` observation now permanently revokes the current experimental
+file-read lease. Returning to the previous focus, source or NORMAL session state
+cannot revive that lease without another qualifying gesture. Read-time API errors
+also fail closed, and a failed window-signal disconnect cannot retain authorization.
+Joined gate/portal tests verify immediate file-request rejection, recovery through
+a fresh gesture and unchanged image requests. The complete Node suite passes 214 tests.
+
+This hardening does not authenticate clipboard readers, observe every unreported
+state transition, or cancel transfers already authorized before revocation. It does
+not change the one-second shared window or provide strict Ctrl+V-only guarantees.
+Real desktop delivery and application compatibility still require GUI validation.

@@ -116,20 +116,36 @@ export class ClipboardPasteGate {
     }
 
     allows(source) {
-        return !this._destroyed && this._action !== 0 && this._normalMode() &&
-            source === this._source && source === this._getSource() &&
-            this._focus !== null && global.display.focus_window === this._focus &&
-            GLib.get_monotonic_time() < this._deadline;
+        try {
+            if (!this._destroyed && this._action !== 0 && this._normalMode() &&
+                source === this._source && source === this._getSource() &&
+                this._focus !== null && global.display.focus_window === this._focus &&
+                GLib.get_monotonic_time() < this._deadline)
+                return true;
+        } catch {
+            // A read-time API failure must reject the request, not strand it.
+        }
+        // Revoke an observed invalid lease even if its desktop notification was
+        // delayed or missed. Returning to the old state must not resurrect it.
+        this.invalidate();
+        return false;
     }
 
     invalidate() {
         this._deadline = 0;
         this._source = null;
-        if (this._windowId) {
-            this._focus.disconnect(this._windowId);
-            this._windowId = 0;
-        }
+        const focus = this._focus;
+        const windowId = this._windowId;
+        this._windowId = 0;
         this._focus = null;
+        if (windowId) {
+            try {
+                focus.disconnect(windowId);
+            } catch (error) {
+                // Revocation is already complete even if the window vanished.
+                logError(error);
+            }
+        }
     }
 
     destroy() {
