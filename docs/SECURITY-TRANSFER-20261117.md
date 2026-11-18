@@ -783,3 +783,35 @@ READY 文本替代控制包通道，不验证真实 sendPacket；未使用错误
 新增 seam 仅使 lan.js hash 变化；两个既有下载夹具的固定 hash 同步更新。
 NAT、SSH、真实配对和真实剪贴板未触碰。生产默认依旧是通配绑定，不能宣称
 新增 seam 将正常部署改成回环限定。
+
+## 2026-11-18：TLS 递归异常最小化与测试入口修正
+
+后续诊断没有改生产取消/认证实现。移除全部生产模块，仅保留 GIO 原生
+TLS server、callback 形式的握手/`splice_async` 与单一 `Gio.Cancellable`，
+独立 Python TLS 对端仍可复现同样无栈 `too much recursion`。
+每次握手都是**一个全新 GJS 子进程**，不是单进程重复握手累积。
+
+在阶段日志中，一次运行前两进程正常完成取消，第三进程停在
+`HANDSHAKE_START`；加细日志后又在同处复现，尚未出现 `CERT_ENTER`、
+`HANDSHAKE_DONE`、`SPLICE_START`，也尚未创建取消 timer。
+因此失败不需要生产 `_uploadRich`、linkCancellables 或正在执行的取消逻辑。
+仅握手并正常关闭的缩小版本，在两机各 5 个独立进程均通过；这不证明问题消失。
+
+同一最小取消逻辑只将入口从模块顶层 await 改为 `async run()` 加显式
+`GLib.MainLoop`，两机分别在“取消回调不关闭 raw socket”和“关闭 raw socket”
+两种对照下各 3 个独立进程，共 **12/12** 通过，均得到原生 CANCELLED。
+记录的证书/完成回调与主流程线程 ID 相同；不能据此推断未观察到的内部线程行为。
+
+随后仅对 `testPackagedRichUploadTls.js` 施加同样入口包装，提取的生产方法、
+临时证书、回环 seam、负载、取消及错误类型/认证/unpair 断言均未改变。
+两台 VM **连续两轮各 6/6，共 24 场景通过**，包含先前失败的进行中取消。
+入口 Promise 异常记录 stack，最终以 `System.exit(1)` 退出，不吞掉失败。
+最终测试脚本 SHA-256：
+`02a2629415f29bd41780fb4f5b8e13e26c0d0a8fff6c78998270d8b888ae95dd`。
+Runner SHA-256：`b2a961c2c90e4ed57e7743296e8af83e6e1043d9cb17765c8294c7d666b1e828`。
+包仍是 `609d3bda…`，测试后临时资源清理并核验不存在。
+
+**结论限于测试入口相关性及夹具修正，不是已确认的底层 GJS/GIO 根因，
+更不是生产 TLS 取消修复。** 前一个提交保留原顶层 await 复现入口和失败记录；
+最小诊断源/runner（不含证书、私钥、真实设备数据）另有本地归档保留。
+仍未覆盖真实控制通道、发现/配对、跨 VM 传输及桌面粘贴。
