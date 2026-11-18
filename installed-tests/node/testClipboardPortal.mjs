@@ -14,9 +14,11 @@ import test from 'node:test';
  * @param {boolean} options.available - Native helper availability
  * @param {object|null} options.nativeAdapter - Optional fake native adapter
  * @param {boolean} options.experimental - Enable experimental gate fixture
+ * @param {boolean} options.realGate - Join the production gate to the production portal
+ * @param {boolean} options.conflict - Simulate an unavailable shortcut
  * @returns {object} Portal and observed test state
  */
-function fixture({available = true, nativeAdapter = null, experimental = false} = {}) {
+function fixture({available = true, nativeAdapter = null, experimental = false, realGate = false, conflict = false} = {}) {
     let serial = 0;
     const signals = [], sources = [], owners = [], unsets = [], transfers = [];
     const callbacks = new Map();
@@ -83,9 +85,10 @@ function fixture({available = true, nativeAdapter = null, experimental = false} 
             SelectionSourceMemory: {new: (mime, bytes) => ({mime, bytes})}},
         DBus: {wrapObject: () => ({export() {}, unexport() {}})}, TextDecoder,
         global: {display: {get_selection: () => selection}}, logError: error => logs.push(error)};
+    const desktop = realGate ? attachGateDesktop(scope, conflict) : null;
     vm.runInNewContext(`${source}\nthis.Portal = Clipboard; this.setPortal = p => _portal = p; this.unwatch = unwatchService;`, scope);
-    const portal = new scope.Portal({experimentalPasteGate: experimental});
-    return {portal, sources, signals, owners, unsets, selection, transfers, callbacks, scope,
+    const portal = new scope.Portal({experimentalPasteGate: experimental, pasteGateEnabled: realGate});
+    return {portal, sources, signals, owners, unsets, selection, transfers, callbacks, scope, desktop,
         failConstruction() { failConstruction = true; }};
 }
 
@@ -264,4 +267,145 @@ test('availability requires constructed source with signals and working close', 
     assert.equal(constructions, 1);
     assert.equal(closed, true);
     assert.deepEqual(signals, ['request', 'cancel-requested']);
+});
+
+
+/**
+ * Load the production gate with synthetic desktop APIs into the portal scope.
+ * No GI, real selection, D-Bus connection or keyboard events are used.
+ * @param {object} scope - Portal VM context
+ * @param {boolean} conflict - Simulate a shortcut owned elsewhere
+ * @returns {object} Controllable clock and desktop signals
+ */
+function attachGateDesktop(scope, conflict) {
+    /**
+     * Build a synthetic desktop signal source.
+     * @param {object} fields - Fake API fields
+     * @returns {object} Signal emitter
+     */
+    function emitter(fields = {}) {
+        const signals = new Map();
+        let serial = 0;
+        return Object.assign(fields, {
+            connect(name, callback) { signals.set(++serial, {name, callback}); return serial; },
+            disconnect(id) { signals.delete(id); },
+            signal(name, ...args) {
+                return [...signals.values()].filter(entry => entry.name === name)
+                    .map(entry => entry.callback(null, ...args));
+            },
+        });
+    }
+    let now = 100;
+    const window = emitter();
+    const display = emitter({...scope.global.display, focus_window: window,
+        grab_accelerator: () => conflict ? 0 : 42, ungrab_accelerator() {}});
+    const wm = emitter(), stage = emitter();
+    const sessionMode = emitter({isLocked: false, isGreeter: false});
+    let event = {type: () => 1, get_flags: () => 0, get_state: () => 4,
+        get_key_symbol: () => 118, get_source_device: () => ({get_capabilities: () => 2})};
+    Object.assign(scope, {Clutter: {
+        get_current_event: () => event, EventFlags: {FLAG_REPEATED: 4, FLAG_SYNTHETIC: 1},
+        EventType: {KEY_PRESS: 1}, ModifierType: {CONTROL_MASK: 4},
+        KEY_v: 118, KEY_V: 86, InputCapabilities: {KEYBOARD: 2},
+    }, Shell: {ActionMode: {NORMAL: 1, NONE: 0}},
+    Main: {actionMode: 1, sessionMode, wm: {allowKeybinding() {}}, notify() {}}});
+    Object.assign(scope.Meta, {KeyBindingAction: {NONE: 0},
+        external_binding_name_for_action: id => `external-${id}`});
+    scope.GLib.get_monotonic_time = () => now;
+    scope.global = {display, window_manager: wm, stage};
+    const code = readFileSync(new URL('../../src/shell/clipboardPasteGate.js', import.meta.url), 'utf8')
+        .replace(/^import .*;\n/gm, '').replace('export class ', 'class ');
+    vm.runInNewContext(`${code}\nthis.ClipboardPasteGate = ClipboardPasteGate;`, scope);
+    return {display, window, stage, sessionMode,
+        advance: us => { now += us; },
+        key: changes => { event = {...event, ...changes}; },
+        press: () => wm.signal('filter-keybinding', {get_name: () => 'external-42'}),
+    };
+}
+
+const fileMimes = ['text/uri-list', 'x-special/gnome-copied-files'];
+
+test('joined gate/portal blocks pre-read and authorizes both file MIME reads only within its window', () => {
+    const r = fixture({experimental: true, realGate: true});
+    try {
+        r.portal.Offer('files', fileMimes);
+        const source = r.sources[0];
+        for (const mime of fileMimes) source.emit('request', `pre-${mime}`, mime);
+        assert.equal(r.signals.length, 0);
+        assert.equal(source.resolutions.length, 2);
+        assert.ok(source.resolutions.every(([, bytes, error]) => bytes === null && /Ctrl\+V/.test(error)));
+        assert.deepEqual(r.desktop.press(), [true]);
+        for (const mime of fileMimes) source.emit('request', `allowed-${mime}`, mime);
+        assert.equal(r.signals.length, 2);
+        assert.ok(r.signals.every(([signal, offer]) => signal === 'ValueRequested' && offer === 'files'));
+        r.desktop.advance(999999);
+        source.emit('request', 'edge-before', fileMimes[0]);
+        assert.equal(r.signals.length, 3);
+        r.desktop.advance(1);
+        source.emit('request', 'edge-at', fileMimes[1]);
+        assert.equal(r.signals.length, 3);
+        assert.equal(source.resolutions.length, 3);
+        r.desktop.press();
+        source.emit('request', 'repeat-paste', fileMimes[0]);
+        assert.equal(r.signals.length, 4);
+    } finally { r.portal.destroy(); }
+});
+
+test('joined gate/portal revokes a lease on replacement even when offer id is reused', () => {
+    const r = fixture({experimental: true, realGate: true});
+    try {
+        r.portal.Offer('same-id', fileMimes); r.desktop.press();
+        const old = r.sources[0];
+        r.portal.Offer('same-id', fileMimes);
+        assert.equal(old.closed, 1);
+        r.sources[1].emit('request', 'replacement-read', fileMimes[0]);
+        assert.equal(r.signals.length, 0);
+        assert.equal(r.sources[1].resolutions.length, 1);
+        r.desktop.press(); r.sources[1].emit('request', 'new-gesture', fileMimes[0]);
+        assert.equal(r.signals.length, 1);
+    } finally { r.portal.destroy(); }
+});
+
+for (const reason of ['focus', 'shell-focus', 'lock', 'owner', 'disable']) {
+    test(`joined gate/portal revokes file reads on ${reason}`, () => {
+        const r = fixture({experimental: true, realGate: true});
+        try {
+            r.portal.Offer('files', fileMimes); r.desktop.press();
+            if (reason === 'focus') r.desktop.display.signal('notify::focus-window');
+            if (reason === 'shell-focus') r.desktop.stage.signal('notify::key-focus');
+            if (reason === 'lock') { r.desktop.sessionMode.isLocked = true; r.desktop.sessionMode.signal('updated'); }
+            if (reason === 'owner') r.portal._onOwnerChanged(r.selection, 1, {});
+            if (reason === 'disable') r.portal.setPasteGateEnabled(false);
+            if (reason === 'owner') {
+                assert.equal(r.sources[0].closed, 1);
+                r.portal.Offer('next', fileMimes);
+            }
+            const source = r.sources.at(-1);
+            source.emit('request', 'blocked', fileMimes[0]);
+            assert.equal(r.signals.filter(([name]) => name === 'ValueRequested').length, 0);
+            assert.equal(source.resolutions.length, 1);
+        } finally { r.portal.destroy(); }
+    });
+}
+
+test('joined gate/portal fails closed after shortcut conflict but leaves non-file reads unchanged', () => {
+    const r = fixture({experimental: true, realGate: true, conflict: true});
+    try {
+        r.portal.Offer('mixed', [...fileMimes, 'image/png']);
+        r.desktop.press();
+        for (const mime of fileMimes) r.sources[0].emit('request', mime, mime);
+        assert.equal(r.signals.length, 0);
+        r.sources[0].emit('request', 'image', 'image/png');
+        assert.deepEqual(r.signals, [['ValueRequested', 'mixed', 'image', 'image/png']]);
+    } finally { r.portal.destroy(); }
+});
+
+test('joined gate/portal does not authenticate readers during the shared multi-read window', () => {
+    const r = fixture({experimental: true, realGate: true});
+    try {
+        r.portal.Offer('files', fileMimes); r.desktop.press();
+        // The interface contains a request ID, not the requesting application identity.
+        for (const id of ['intended-reader', 'racing-preview']) r.sources[0].emit('request', id, fileMimes[0]);
+        assert.deepEqual(r.signals.map(([, , id]) => id), ['intended-reader', 'racing-preview']);
+    } finally { r.portal.destroy(); }
 });

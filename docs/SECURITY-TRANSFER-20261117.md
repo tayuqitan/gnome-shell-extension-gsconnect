@@ -525,3 +525,20 @@ and hash gates. This upgrades transport evidence for this package's extracted
 Core methods/helpers only. Full service startup, Device integration with real
 peers, plaintext identity negotiation, desktop and two-machine acceptance are
 still untested. No formal extension was installed and no pairings were touched.
+
+## 2026-11-18: joined gate and portal component contract
+
+Added nine Node cases in `testClipboardPortal.mjs` that load the actual
+`clipboardPasteGate.js` and `clipboard.js` together. Only desktop APIs, the
+native source adapter, selection ownership and the monotonic clock are synthetic;
+no real keyboard input, clipboard, D-Bus connection or network is involved.
+The cases cover pre-read rejection without `ValueRequested`, both file MIME
+formats, the exact one-second expiry boundary, repeat paste, replacement with a
+reused offer ID, focus/Shell-focus/lock/owner/disable revocation and shortcut
+conflict. A separate case deliberately verifies that two distinct request IDs
+can both pass within the shared window: this gate does not authenticate readers.
+
+Host Node regression: 206 tests passed, zero failed/skipped. These component
+results do not prove real Mutter keybinding propagation, GNOME application paste,
+clipboard-manager behavior, or the user's strict Ctrl+V trigger requirement.
+The experimental setting and production code are unchanged.
