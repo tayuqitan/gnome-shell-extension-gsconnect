@@ -859,3 +859,30 @@ Shell 的唯一 D-Bus owner、扩展实际路径/ACTIVE 状态和 portal owner�
 进程组列表，最终两机均断言四个组（Shell、两个bus、client）已不存在。
 这些改动后最终两机再各 5 组通过。不包含可选 60 秒 native deadline 场景。
 这里是私有会话隔离，不是 OS 网络 namespace 或恶意同 UID 安全边界。
+
+## 2026-11-18：私有 Shell 的取消/替换交错边界
+
+`testShellServiceClipboard.js` 再增加两个受控交错场景，两机最终各 **7 组通过**。
+原服务 `_call` 仅被夹具包装：实际 D-Bus `Offer` 或 `GetOffer` 已正常完成，
+其返回值向调用链的投递暂停；生产方法、Shell portal/native 和清理实现不变。
+因此这是**应用层延迟回包投递的确定性交错**，不是制造真实 D-Bus 传输挂死。
+
+两个暂停点分别是 `receiveFiles` 等待发布完成，以及等待真实所有权核验返回：
+- 先通过独立真实 portal 查询确认旧接收 offer 已经到达 Shell。
+- 调用旧 receive token 的 `cancelDownload`，立即通过原服务发布新合成 offer，
+  再从实际 Shell 确认新 ID 已成为当前 owner。
+- 明确断言旧 receive 尚未完成，保留“不能立即打断已在途发布/核验”的限制。
+- 放行旧返回值后，旧 receive 以取消错误失败，不发送“文件已接收”成功反馈。
+- 旧清理结束后，原服务和实际 Shell 仍确认新 offer，native 读取的新内容
+  逐字节一致，不被旧接收清除。
+
+两组都在 finally 放行等待、等待旧 receive 收束、还原测试包装并清理新 offer。
+客户端最终 SHA-256：
+`4183521c1df9d7dfcea4535de757454721165c69aa828eb489177d46a52abb50`。
+包仍为 `609d3bda…`；两机均 exit 0，服务销毁后无隐藏错误，四个私有进程组
+不存在和临时目录删除已断言。未触真实剪贴板、真实设备、NAT 或配对。
+
+这补充了顺序旧 ID 保护之外的受控交错证据，不穷尽所有调度、服务失联或
+transport timeout。仍不能声称取消立即中断原生/D-Bus操作、恶意同 UID 隔离、
+物理键盘/文件管理器或真实双机桌面验收；缓存文件可能已接收完成但不再发布，
+本轮也没有将“取消”解释为保证删除所有已接收缓存文件。

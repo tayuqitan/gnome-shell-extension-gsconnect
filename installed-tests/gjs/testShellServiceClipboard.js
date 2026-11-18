@@ -299,6 +299,85 @@ async function serviceIntegration(options, portal) {
         await clipboard.clearOffer(newId);
         assert(debugErrors.length === 0, 'No hidden service errors');
         print('PASS real service + Shell: stale cleanup preserves replacement offer');
+        for (const phase of ['Offer', 'GetOffer']) {
+            await delay(50); // Settle the preceding synthetic ownership notifications.
+            await rich.accept({id: `private-race-${phase}`, revision: 10, origin: 'private-peer',
+                types: ['text/uri-list'], files: [{name: 'race.txt', size: 22}]});
+            const remote = rich.remote;
+            const originalCall = clipboard._call;
+            const originalCheck = clipboard.isCurrentOffer;
+            let release, entered;
+            let captured = false, checking = false, settled = false;
+            const held = new Promise(resolve => {
+                release = resolve;
+            });
+            const reached = new Promise(resolve => {
+                entered = resolve;
+            });
+            const noticeStart = notices.length;
+            clipboard.isCurrentOffer = async function (id) {
+                checking = id === remote.clipboardId;
+                try {
+                    return await originalCheck.call(this, id);
+                } finally {
+                    checking = false;
+                }
+            };
+            clipboard._call = async function (method, parameters = null, proxy = this._clipboard) {
+                const intercept = !captured && method === phase &&
+                    (phase === 'Offer' ? parameters.deepUnpack()[0] === remote.clipboardId : checking);
+                if (intercept)
+                    captured = true;
+                const reply = await originalCall.call(this, method, parameters, proxy);
+                if (intercept) {
+                    entered();
+                    await held; // Delay delivery, not the real D-Bus operation itself.
+                }
+                return reply;
+            };
+            const receive = rich.receiveFiles(remote.receiveToken).then(
+                () => {
+                    settled = true;
+                    return {ok: true};
+                },
+                error => {
+                    settled = true;
+                    return {error};
+                });
+            const replacement = `replacement-${phase}-${GLib.uuid_string_random()}`;
+            try {
+                const ready = await Promise.race([reached.then(() => true),
+                    delay(5000).then(() => false)]);
+                assert(ready && !settled, `${phase}: pending response boundary was reached`);
+                assert((await portal('GetOffer')).deepUnpack()[0] === remote.clipboardId,
+                    `${phase}: original offer really reached Shell`);
+                rich.cancelDownload(remote.receiveToken);
+                await clipboard.offer(replacement, [MIME], () => FIXTURE.slice(), 60);
+                assert((await portal('GetOffer')).deepUnpack()[0] === replacement,
+                    `${phase}: replacement really reached Shell`);
+                assert(!settled, `${phase}: cancellation does not falsely claim immediate completion`);
+                release();
+                const result = await receive;
+                assert(Boolean(result.error) && result.error.message.includes('取消'),
+                    `${phase}: revoked receive must fail with cancellation`);
+                assert(await originalCheck.call(clipboard, replacement),
+                    `${phase}: old receive cleanup preserves new ownership`);
+                const value = (await portal('GetValue', new GLib.Variant('(s)', [MIME])))
+                    .deepUnpack()[0];
+                assert(value.length === FIXTURE.length && FIXTURE.every((v, i) => value[i] === v),
+                    `${phase}: replacement bytes remain readable after old cleanup`);
+                assert(!notices.slice(noticeStart).some(notice => notice.title === '文件已接收'),
+                    `${phase}: canceled receive must not report success`);
+                print(`PASS real service + Shell: cancel at delayed ${phase} delivery preserves replacement`);
+            } finally {
+                release();
+                await receive;
+                clipboard._call = originalCall;
+                clipboard.isCurrentOffer = originalCheck;
+                await clipboard.clearOffer(replacement);
+            }
+        }
+
     } finally {
         rich?.destroy();
         clipboard.destroy();
