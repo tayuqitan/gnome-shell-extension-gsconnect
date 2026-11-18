@@ -1079,6 +1079,20 @@ export const Channel = GObject.registerClass({
         }
     }
 
+    /**
+     * Bind a rich-transfer listener. Kept separate for loopback-only fixtures;
+     * production retains the same wildcard binding and port selection.
+     * This is not a packet, environment or user-settings controlled option.
+     *
+     * @param {Gio.SocketListener} listener - Owned transfer listener
+     * @param {number} port - Candidate transfer port
+     * @returns {number} Bound port
+     */
+    _bindRichTransferListener(listener, port) {
+        listener.add_inet_port(port, null);
+        return port;
+    }
+
     async _uploadRich(packet, source, size, cancellable) {
         const lifetime = linkCancellables(this.cancellable, cancellable);
         cancellable = lifetime.cancellable;
@@ -1097,7 +1111,7 @@ export const Channel = GObject.registerClass({
             let port = TRANSFER_MIN;
             for (; port <= TRANSFER_MAX; port++) {
                 try {
-                    listener.add_inet_port(port, null);
+                    port = this._bindRichTransferListener(listener, port);
                     break;
                 } catch (error) {
                     if (port === TRANSFER_MAX)

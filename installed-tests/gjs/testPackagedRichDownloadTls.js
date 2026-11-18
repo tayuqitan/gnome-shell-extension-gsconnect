@@ -19,7 +19,7 @@ if (!root || ARGV.length !== 3 || !modes.includes(ARGV[1]) ||
     !/^[0-9]+$/.test(ARGV[2]) || Number(ARGV[2]) < 1 || Number(ARGV[2]) > 65535)
     throw new Error('Usage: gjs -m testPackagedRichDownloadTls.js VERIFIED_PACKAGE_DIRECTORY MODE LOOPBACK_PORT');
 const expected = {
-    'service/backends/lan.js': 'c0ba6c5d787a46a0715094917b7b22a0581c2df1ac8550091115e2258bdb5a04',
+    'service/backends/lan.js': '698ff786fcbd9ba85da8a6e27d1a6816cbee567cabd8539a0feed88fbe24cf99',
     'service/utils/exactTransfer.js': 'df24097b9135b1b373613c44be38d8a9a8ab0d5b669f2820cf156f88ce4ea3d7',
     'service/utils/writeBytes.js': '5d3fcb5fed14cf97191e3347a776d7d01547170731f74184bb8cfeaef2634af4',
     'service/utils/transferCancellation.js': 'de682794319d5df6e8e6dd09f161be7b8890dcc0a9bb0a1d563785758ef5898e',

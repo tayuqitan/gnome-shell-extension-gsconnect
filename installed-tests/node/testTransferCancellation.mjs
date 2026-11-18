@@ -46,7 +46,8 @@ function fixture(stage) {
     const target = {...closable('target'), write_all_async: (_bytes, _priority, token) => wait('write', token)};
     const source = closable('source');
     const scope = {writeBytes: (target, bytes, token) => target.write_all_async(bytes, 0, token), Promise, Set, Error, debug() {}, logError() {}, _configureSocket() {},
-        TRANSFER_MIN: 1739, TRANSFER_MAX: 1740,
+        TRANSFER_MIN: Number(lan.match(/const TRANSFER_MIN = (\d+);/)[1]),
+        TRANSFER_MAX: Number(lan.match(/const TRANSFER_MAX = (\d+);/)[1]),
         GLib: {PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false,
             timeout_add_seconds(_priority, seconds, callback) { assert.equal(seconds, 5); timers.set(++nextTimer, callback); return nextTimer; },
             source_remove(id) { timers.delete(id); }},
@@ -148,4 +149,57 @@ test('large batches of rejected rich payloads never create outbound connections'
     const f = fixture('connect');
     for (let i = 0; i < 10000; i++) await f.channel.rejectTransfer({...packet(), hasPayload: () => true});
     assert.deepEqual(f.seen, []);
+});
+
+test('rich listener seam preserves default bind and does not use packet address fields', async () => {
+    const f = fixture('none');
+    const calls = [];
+    const listener = {add_inet_port: (...args) => calls.push(args)};
+    assert.equal(f.channel._bindRichTransferListener(listener, 1743), 1743);
+    assert.deepEqual(calls, [[1743, null]]);
+    const bound = [];
+    f.channel._bindRichTransferListener = (_listener, port) => {
+        bound.push(port);
+        f.seen.push('listen');
+        return 32456;
+    };
+    let sent;
+    f.channel.sendPacket = value => { sent = value; return Promise.resolve(); };
+    const value = packet();
+    value.body.bindAddress = '198.51.100.1';
+    await f.channel.upload(value, f.source, 1, f.token);
+    assert.deepEqual(bound, [1739]);
+    assert.equal(sent.payloadTransferInfo.port, 32456);
+});
+
+test('rich listener retries next port without changing default range', async () => {
+    const f = fixture('none');
+    const attempts = [];
+    f.channel._bindRichTransferListener = (_listener, port) => {
+        attempts.push(port);
+        if (port === 1739) throw Error('busy');
+        return port;
+    };
+    let sent;
+    f.channel.sendPacket = value => { sent = value; return Promise.resolve(); };
+    await f.channel.upload(packet(), f.source, 1, f.token);
+    assert.deepEqual(attempts, [1739, 1740]);
+    assert.equal(sent.payloadTransferInfo.port, 1740);
+});
+
+test('rich listener exhaustion cleans up without accepting or sending', async () => {
+    const f = fixture('none');
+    const attempts = [];
+    f.channel._bindRichTransferListener = (_listener, port) => {
+        attempts.push(port);
+        throw Error('busy');
+    };
+    await assert.rejects(f.channel.upload(packet(), f.source, 1, f.token), /busy/);
+    assert.deepEqual(attempts, Array.from({length: 26}, (_, index) => index + 1739));
+    assert.equal(f.seen.includes('accept'), false);
+    assert.equal(f.seen.includes('send'), false);
+    assert.ok(f.seen.includes('listener closed'));
+    assert.ok(f.seen.includes('close source'));
+    assert.equal(f.token.handlers.size, 0);
+    assert.equal(f.channel.cancellable.handlers.size, 0);
 });

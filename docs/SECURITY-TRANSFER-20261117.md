@@ -742,3 +742,44 @@ GIO 服务端对有效客户端证书也要求显式接受回调，初版缺少�
 完整 Core.Transfer、真实发现、双机传输、通知中心或桌面粘贴。
 不改变 NAT/SSH，不触碰真实配对和剪贴板。发布/ownership D-Bus 已在途时的
 取消不能立即中断，返回或超时后唯一 ID 尽力清理仍属既有边界，不是本轮证实的缺陷。
+
+## 2026-11-18：rich upload 最小监听 seam 与未通过的取消诊断
+
+新增 `_bindRichTransferListener(listener, port)`，默认仍调用原
+`add_inet_port(port, null)`，返回原 port；只有 `_uploadRich` 调用它。
+legacy upload 不变，1739–1764 顺序/重试不变，无协议字段、环境变量或
+用户设置可配置该方法。测试在调用前覆写实例方法，使用
+`add_address(127.0.0.1, 0)`，检查实际地址和有效端口。
+独立只读审查未发现 seam 的阻断问题；新增 Node 测试覆盖默认参数、
+忽略伪造 packet.bindAddress、首端口失败后重试、全范围耗尽时不 accept/send
+并清理 source/listener/取消处理器。
+
+新增 `testPackagedRichUploadTls.js`、`runPackagedRichUploadTls.py`，
+使用 hash 固定的原 `_uploadRich/_encryptServer/_authenticate`、Packet 和
+取消清理函数。只导入提取的方法，不初始化 LAN 服务或设备；内存 settings
+只提供临时 client.pem，任何其他设置访问或 unpair 都令测试失败。
+Python 独立 TLS 客户端严格验证临时 CA、hostname 与 server leaf。
+GJS 端保留**生产 TOFU 握手后客户端 leaf pin**，不声称是服务端严格 CA 校验。
+READY 文本替代控制包通道，不验证真实 sendPacket；未使用错误证书测试。
+
+首台 VM 的结果：
+- 2 MiB 成功传输与固定 SHA-256 一致：
+  `7e879fcd2433cef4a0888eee46fbbb05240f594b89e5052faf491c44888cb0ed`。
+- 零长度成功；短 1 字节源得到 PARTIAL_INPUT；以上三个均走到原生产认证，
+  synthetic unpaired=false。
+- accept 阶段取消、预取消通过；预取消没有绑定监听。
+- **正在传输的 16 MiB TLS upload 取消未通过**：GJS 报无栈
+  `too much recursion`，客户端进程 -5；失败即停，未执行第二台。
+  所有创建的临时证书、文件、进程和目录均已清理核验。
+
+不能把这一轮记为 6/6，不能声称修复生产 TLS 取消。独立审查要求取消
+必须是原生 CANCELLED/CLOSED，不能将任意异常加已取消 token 误判通过，已落实。
+此前 download 夹具同进程双端只是一个变量；本次独立 Python 对端仍出现
+类似异常，因此仍须定位 GJS/GIO TLS/取消/夹具边界，不能推断已知根因。
+该 seam 和诊断夹具不等于可交付的真实双机/GUI验收，尚未修改生产取消行为。
+
+当前诊断包 SHA-256：
+`609d3bda37439cbb4dc54b357eb693b3b4d0f6fc95aeecd171ea3e69006cead8`。
+新增 seam 仅使 lan.js hash 变化；两个既有下载夹具的固定 hash 同步更新。
+NAT、SSH、真实配对和真实剪贴板未触碰。生产默认依旧是通配绑定，不能宣称
+新增 seam 将正常部署改成回环限定。
