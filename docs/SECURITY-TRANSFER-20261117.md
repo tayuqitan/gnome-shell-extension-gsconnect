@@ -611,3 +611,29 @@ removed; invoke `gjs -m /path/to/testExplicitFileReceive.js /path/to/unpacked-zi
 No extension was installed; no real clipboard, discovery, pairing, network payload,
 GUI notification or two-machine transfer was exercised. This extends component
 and target-runtime evidence, not desktop acceptance.
+
+### Private-display GTK component verification (2026-11-18)
+
+Both RHEL 10.2 VMs passed four real GTK 3 component scenarios using the packaged
+production history/dialog classes and synthetic receive callbacks:
+`installed-tests/gjs/testExplicitReceiveDialog.js`. Coverage includes initial
+no-download behavior and visible explicit action; pending/disabled and success
+states; failure/retry; stale-record rejection; and closing during a pending action.
+Synthetic ready/pending/success/error window renders were saved for internal visual
+inspection. The final runs enable fatal GTK criticals and exit zero without client
+warnings. An earlier drawing-allocation failure was corrected in the test harness.
+
+The harness starts only a disposable headless GNOME Shell, an empty private session
+bus and a separate empty private mock system bus, with no service activation dirs.
+The real system bus and the user's locked Wayland session are never used. The
+first attempt with an unreachable system-bus address failed Shell initialization;
+creating an isolated empty bus resolved that test dependency without permitting
+access to actual system services. HOME/XDG directories are temporary, GSettings is
+memory-only, Xwayland is disabled, core limit is zero and process deadlines apply.
+All created process groups are stopped and temporary directories removed after
+runs. No GSConnect extension or discovery daemon is loaded. Screenshots draw only
+the synthetic GTK window, not the user's screen.
+
+This verifies actual GTK construction/layout/callback presentation on the target
+runtime, not real notification-center buttons, actual file receipt, application
+paste, pairing, or two-machine transfer. It is not a same-UID security sandbox.
