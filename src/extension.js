@@ -383,12 +383,9 @@ export default class GSConnectExtension extends Extension {
 
         // This watches for the service to start and exports a custom clipboard
         // portal for use on Wayland
-        const clipboardSettings = new Gio.Settings({
-            settings_schema: Config.GSCHEMA.lookup(
-                'org.gnome.Shell.Extensions.GSConnect', null),
-        });
-        Clipboard.watchService(clipboardSettings.get_boolean(
-            'experimental-clipboard-paste-gate'));
+        // Files require an explicit receive action before local URIs are
+        // published. Do not grab Ctrl+V or gate already received files.
+        Clipboard.watchService();
     }
 
     enable() {

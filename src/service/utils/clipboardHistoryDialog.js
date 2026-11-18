@@ -7,9 +7,10 @@ import ClipboardCacheControls from './clipboardCacheControls.js';
 
 /** History UI deliberately does not preview copied text or images. */
 export default class ClipboardHistoryDialog {
-    constructor(history, {peerName = '', onActivate, onLimits, onClear, disk, persistence} = {}) {
+    constructor(history, {peerName = '', onActivate, onReceive, onLimits, onClear, disk, persistence} = {}) {
         this.history = history;
         this.onActivate = onActivate;
+        this.onReceive = onReceive;
         this.persistence = persistence;
         this.window = new Gtk.Dialog({
             title: `剪贴板历史 · ${peerName}`,
@@ -27,7 +28,7 @@ export default class ClipboardHistoryDialog {
             wrap: true, xalign: 0,
         }));
         content.add(new Gtk.Label({
-            label: '文件历史不预传文件内容。源文件已改变、被删除或历史已清理时可能无法再次粘贴。',
+            label: '文件需先点击“接收并准备粘贴”，完成后再 Ctrl+V。打开历史或后台读取不会下载文件。',
             wrap: true, xalign: 0,
         }));
         if (persistence) {
@@ -116,13 +117,17 @@ export default class ClipboardHistoryDialog {
                 xalign: 0, wrap: true, hexpand: true,
             });
             row.add(label);
-            const select = new Gtk.Button({label: '恢复'});
+            const needsReceive = entry.direction === 'remote' && entry.offer.files.length && !entry.uris;
+            const select = new Gtk.Button({label: needsReceive ? '接收并准备粘贴' : '恢复'});
             select.connect('clicked', async () => {
                 select.sensitive = false;
                 try {
                     if (!this.history.get(entry.key))
                         throw new Error('此记录已被清理');
-                    await this.onActivate(entry);
+                    if (needsReceive)
+                        await this.onReceive(entry);
+                    else
+                        await this.onActivate(entry);
                     if (!this.destroyed)
                         this.status.label = '已恢复剪贴板，请在目标应用按 Ctrl+V。';
                 } catch (error) {

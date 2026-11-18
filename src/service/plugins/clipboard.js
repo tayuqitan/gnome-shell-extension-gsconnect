@@ -36,6 +36,12 @@ export const Metadata = {
             parameter_type: null,
             incoming: [], outgoing: [],
         },
+        clipboardReceiveFiles: {
+            label: '接收文件并准备粘贴',
+            icon_name: 'folder-download-symbolic',
+            parameter_type: 's',
+            incoming: [CAPABILITY], outgoing: [],
+        },
         clipboardCancel: {
             label: _('Cancel Clipboard Transfer'),
             icon_name: 'process-stop-symbolic',
@@ -260,6 +266,7 @@ const ClipboardPlugin = GObject.registerClass({
                         .get_value('clipboard-cache-max-bytes').deepUnpack()).retryFailedRollbacks(),
                 },
                 onActivate: entry => this._rich.activateHistory(entry),
+                onReceive: entry => this._rich.receiveHistoryFiles(entry),
                 onClear: () => {
                     this._rich.history.clear();
                     // Retry failed removal even if memory was already empty.
@@ -272,6 +279,16 @@ const ClipboardPlugin = GObject.registerClass({
             });
         }
         this._historyDialog.show();
+    }
+
+    async clipboardReceiveFiles(token) {
+        try {
+            await this._rich.receiveFiles(token);
+        } catch (error) {
+            this.device.showNotification({id: 'clipboard-files-receive-error',
+                title: '无法接收文件', body: error.message,
+                icon: new Gio.ThemedIcon({name: 'dialog-error-symbolic'})});
+        }
     }
 
     clipboardCancel(id) {

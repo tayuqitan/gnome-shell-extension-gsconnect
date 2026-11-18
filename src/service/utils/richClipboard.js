@@ -54,6 +54,8 @@ export default class RichClipboard {
             maxItems: plugin.settings.get_uint('history-max-items'),
             maxBytes: plugin.settings.get_uint('history-max-bytes'),
             onEvict: entry => {
+                if (this.remote?.historyEntry === entry)
+                    this.clearRemote();
                 for (const transfer of this.serving.values()) {
                     const current = this.local?.id === entry.id &&
                         this.local.generation === this.clipboard.generation;
@@ -284,20 +286,118 @@ export default class RichClipboard {
         this.local = null; // Receiving remote content revokes our old local lease.
         this.cancelRevokedTransfers();
         const remote = {id: body.id, revision: body.revision, origin: body.origin,
-            types: body.types, files: body.files, sensitive: Boolean(body.sensitive),
+            types: Object.freeze([...body.types]),
+            files: Object.freeze(body.files.map(file => Object.freeze({...file}))),
+            sensitive: Boolean(body.sensitive),
             download: null, fileCache: null};
         this.remote = remote;
-        await this.clipboard.offer(remote.id, remote.types, async (mime, cancellable) => {
+        if (remote.files.length) {
+            remote.receiveToken = GLib.uuid_string_random();
+            remote.receiveGeneration = this.clipboard.generation;
+            remote.clipboardId = `received-${remote.receiveToken}`;
+            this.notify({
+                id: 'clipboard-files-ready', title: _('Remote files available'),
+                body: `${remote.files.length} 个文件待接收。先接收完成，再在目标应用按 Ctrl+V。`,
+                icon: new Gio.ThemedIcon({name: 'folder-download-symbolic'}),
+                buttons: [{label: '接收并准备粘贴', action: 'clipboardReceiveFiles',
+                    parameter: new GLib.Variant('s', remote.receiveToken)}],
+            });
+            return true;
+        }
+        await this.clipboard.offer(remote.id, remote.types, (mime, cancellable) => {
             if (this.remote !== remote)
                 throw new Error('Clipboard offer expired');
-            if (FILE_TYPES.includes(mime)) {
-                const uris = await this.getFiles(remote, cancellable);
-                return new TextEncoder().encode(mime === FILE_TYPES[1]
-                    ? `copy\n${uris.join('\n')}` : `${uris.join('\r\n')}\r\n`);
-            }
+            if (FILE_TYPES.includes(mime))
+                throw new Error('Files require explicit receiving before paste');
             return this.request(remote, {mime}, null, cancellable);
         }, this.timeoutSeconds);
         return true;
+    }
+
+    fileReceiveCurrent(remote, checkGeneration = true) {
+        return !this.closed && this.remote === remote && remote.authorized === true &&
+            this.device.connected && this.enabled &&
+            this.plugin.settings.get_boolean('receive-content') &&
+            (!checkGeneration || this.clipboard.generation === remote.receiveGeneration) &&
+            (!remote.historyEntry ||
+            this.history.get(remote.historyEntry.key) === remote.historyEntry);
+    }
+
+    receiveFiles(token) {
+        const remote = this.remote;
+        if (!remote?.files.length || !token || token !== remote.receiveToken)
+            return Promise.reject(new Error('待接收文件已改变，请重新选择'));
+        if (remote.receiving)
+            return remote.receiving;
+        remote.authorized = true;
+        if (!this.fileReceiveCurrent(remote)) {
+            remote.authorized = false;
+            return Promise.reject(new Error('接收已取消：设备、剪贴板或接收权限已改变'));
+        }
+        let deadline = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+            this.timeoutSeconds, () => {
+                deadline = 0;
+                if (this.remote === remote)
+                    this.cancelDownload(remote.receiveToken);
+                return GLib.SOURCE_REMOVE;
+            });
+        remote.receiving = Promise.resolve().then(async () => {
+            const uris = await this.getFiles(remote);
+            if (!this.fileReceiveCurrent(remote))
+                throw new Error('接收已取消，未更改剪贴板');
+            // Publish verified local paths; clipboard callbacks never download.
+            const values = new Map(FILE_TYPES.map(mime => [mime, new TextEncoder().encode(
+                mime === FILE_TYPES[1] ? `copy\n${uris.join('\n')}` : `${uris.join('\r\n')}\r\n`)]));
+            try {
+                const publication = this.clipboard.offer(remote.clipboardId, FILE_TYPES,
+                    mime => values.get(mime).slice(), this.timeoutSeconds);
+                remote.receiveGeneration = this.clipboard.generation;
+                await publication;
+                if (!await this.clipboard.isCurrentOffer(remote.clipboardId) ||
+                    !this.fileReceiveCurrent(remote, false))
+                    throw new Error('接收已取消，未保留旧剪贴板');
+                remote.receiveGeneration = this.clipboard.generation;
+            } catch (error) {
+                try {
+                    await this.clipboard.clearOffer(remote.clipboardId);
+                } catch (cleanupError) {
+                    debug(cleanupError);
+                }
+                throw error;
+            }
+            this.notify({id: 'clipboard-files-ready',
+                title: '文件已接收', body: '已准备好本地文件，请在目标应用按 Ctrl+V。',
+                icon: new Gio.ThemedIcon({name: 'edit-paste-symbolic'})});
+        }).finally(() => {
+            if (deadline)
+                GLib.source_remove(deadline);
+            remote.authorized = false;
+            remote.receiving = null;
+        });
+        return remote.receiving;
+    }
+
+    async receiveHistoryFiles(entry) {
+        if (this.history.get(entry.key) !== entry || entry.direction !== 'remote' ||
+            !entry.offer.files.length || entry.uris)
+            throw new Error('此记录不需要接收或已失效');
+        if (this.remote?.historyEntry === entry && this.remote.historyReceiving)
+            return this.remote.historyReceiving;
+        const acceptance = this.accept(entry.offer, true);
+        const remote = this.remote;
+        if (!remote || remote.id !== entry.offer.id ||
+            remote.revision !== entry.offer.revision || remote.origin !== entry.offer.origin)
+            throw new Error('历史记录已失效');
+        // Claim before yielding so history windows cannot restart each other.
+        remote.historyEntry = entry;
+        remote.historyReceiving = acceptance.then(restored => {
+            if (!restored || this.remote !== remote || this.history.get(entry.key) !== entry)
+                throw new Error('历史记录已失效');
+            return this.receiveFiles(remote.receiveToken);
+        }).finally(() => {
+            remote.historyReceiving = null;
+        });
+        return await remote.historyReceiving;
     }
 
     async activateHistory(entry) {
@@ -360,7 +460,9 @@ export default class RichClipboard {
 
     request(remote, detail, file = null, cancellable = null) {
         return new Promise((resolve, reject) => {
-            if (this.remote !== remote || cancellable?.is_cancelled())
+            if (this.remote !== remote || cancellable?.is_cancelled() ||
+                ((Number.isInteger(detail.index) || remote.files.length) &&
+                (!Number.isInteger(detail.index) || !this.fileReceiveCurrent(remote))))
                 return reject(new Error('Clipboard offer expired'));
             const request = GLib.uuid_string_random();
             const pending = {remote, detail, file, resolve, reject, transfer: null,
@@ -384,13 +486,15 @@ export default class RichClipboard {
                     });
                 });
             }
-            if (!cancellable?.is_cancelled())
-                this.send({op: 'request', id: remote.id, request, ...detail});
+            if (!cancellable?.is_cancelled()) {
+                this.send({op: 'request', id: remote.id, revision: remote.revision,
+                    origin: remote.origin, request, ...detail});
+            }
         });
     }
 
     getFiles(remote, cancellable = null) {
-        if (this.remote !== remote || cancellable?.is_cancelled())
+        if (!this.fileReceiveCurrent(remote) || cancellable?.is_cancelled())
             return Promise.reject(new Error('Clipboard request cancelled'));
         if (remote.fileCache)
             return Promise.resolve(remote.fileCache);
@@ -400,9 +504,13 @@ export default class RichClipboard {
             remote.download = download;
             download.promise = Promise.resolve().then(() =>
                 this.fetchFiles(remote, download.cancellable)).then(uris => {
-                if (!download.cancellable.is_cancelled() && this.remote === remote)
-                    remote.fileCache = uris;
-                if (!remote.sensitive)
+                if (download.cancellable.is_cancelled() || !this.fileReceiveCurrent(remote))
+                    throw new Error('File receive was revoked');
+                remote.fileCache = uris;
+                const entry = this.history.get(`remote:${remote.id}`);
+                if (!remote.sensitive && entry && entry.offer.revision === remote.revision &&
+                    entry.offer.origin === remote.origin &&
+                    JSON.stringify(entry.offer.files) === JSON.stringify(remote.files))
                     this.history.attachFiles(remote.id, uris);
                 return uris;
             }).finally(() => {
@@ -457,8 +565,19 @@ export default class RichClipboard {
     }
 
     cancelDownload(id) {
-        if (this.remote?.progress?.id === id)
-            this.remote.download?.cancellable.cancel();
+        const remote = this.remote;
+        if (remote && (remote.progress?.id === id || remote.receiveToken === id)) {
+            remote.authorized = false;
+            remote.download?.cancellable.cancel();
+        }
+    }
+
+    notify(notification) {
+        try {
+            this.device.showNotification?.(notification);
+        } catch (error) {
+            debug(error);
+        }
     }
 
     notifyProgress(progress, status, error = null, force = false) {
@@ -468,7 +587,7 @@ export default class RichClipboard {
         progress.lastUpdate = now;
         const amount = `${GLib.format_size(progress.written)} / ${GLib.format_size(progress.total)}`;
         const percent = progress.total ? Math.floor(100 * progress.written / progress.total) : 0;
-        this.device.showNotification?.({
+        this.notify({
             id: `clipboard-transfer-${progress.id}`,
             title: _('Clipboard transfer'),
             body: `${status}: ${amount} (${percent}%) · ${progress.completed}/${progress.count}` +
@@ -482,6 +601,8 @@ export default class RichClipboard {
     }
 
     async fetchFiles(remote, cancellable = null) {
+        if (!this.fileReceiveCurrent(remote) || cancellable?.is_cancelled())
+            throw new Error('Files require an active explicit receive action');
         const progress = {id: GLib.uuid_string_random(), lastUpdate: 0, written: 0,
             total: remote.files.reduce((sum, file) => sum + file.size, 0),
             completed: 0, count: remote.files.length, base: 0};
@@ -503,7 +624,7 @@ export default class RichClipboard {
                 progress.completed++;
                 this.notifyProgress(progress, _('Transferring'), null, true);
             }
-            if (cancellable?.is_cancelled())
+            if (cancellable?.is_cancelled() || !this.fileReceiveCurrent(remote))
                 throw new Error('Clipboard request cancelled');
             const uris = storage.complete(transaction);
             this.notifyProgress(progress, _('Completed'), null, true);
@@ -538,6 +659,9 @@ export default class RichClipboard {
             (!current() && !retained()) || typeof body.request !== 'string' ||
             body.request.length > 64)
             throw new Error('Clipboard lease expired');
+        if ((body.revision !== undefined && body.revision !== offer.revision) ||
+            (body.origin !== undefined && body.origin !== offer.origin))
+            throw new Error('Clipboard offer version changed');
         if (this.serving.size >= 8 || this.serving.has(body.request))
             throw new Error('Too many clipboard transfers');
         const transfer = this.device.createTransfer();
@@ -702,9 +826,17 @@ export default class RichClipboard {
     }
 
     clearRemote() {
-        this.remote?.download?.cancellable.cancel();
+        if (this.remote) {
+            this.remote.authorized = false;
+            this.remote.download?.cancellable.cancel();
+            try {
+                this.device.hideNotification?.('clipboard-files-ready');
+            } catch (error) {
+                debug(error);
+            }
+        }
         if (this.remote)
-            this.clipboard.clearOffer(this.remote.id).catch(debug);
+            this.clipboard.clearOffer(this.remote.clipboardId || this.remote.id).catch(debug);
         this.remote = null;
         for (const [request, pending] of this.pending) {
             pending.transfer?.cancel();

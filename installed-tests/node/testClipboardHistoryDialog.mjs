@@ -50,6 +50,7 @@ function fixture(options = {}) {
         remove: key => removed.push(key),
         subscribe: () => () => { unsubscribed++; }};
     const dialog = new scope.Dialog(history, {onClear: () => { clears++; },
+        onReceive: options.onReceive,
         onLimits: value => limits.push(value), onActivate: options.onActivate || (() => {}),
         persistence: options.persistence || {getEnabled: () => false, setEnabled: value => changes.push(value),
             getStatus: () => 'status'}});
@@ -159,4 +160,28 @@ test('deleting a row delegates only the selected record key', () => {
     const f = fixture({entries: [entry()]});
     f.widgets.find(w => w.label === '删除').events.clicked();
     assert.deepEqual(f.removed, ['local:fixture']);
+});
+
+
+test('uncached remote files require a clearly labeled explicit receive click', async () => {
+    const file = {...entry(), direction: 'remote', uris: null,
+        offer: {types: ['text/uri-list'], files: [{name: 'report.pdf', size: 3}]}};
+    let received = 0, restored = 0;
+    const f = fixture({entries: [file], onActivate: () => { restored++; },
+        onReceive: async selected => { assert.equal(selected, file); received++; }});
+    assert.equal(received, 0);
+    f.dialog.render();
+    assert.equal(received, 0);
+    await f.widgets.find(w => w.label === '接收并准备粘贴').events.clicked();
+    assert.equal(received, 1);
+    assert.equal(restored, 0);
+    assert.match(f.dialog.status.label, /Ctrl\+V/);
+});
+
+test('explicit receive failure leaves a useful history status without restoring clipboard', async () => {
+    const file = {...entry(), direction: 'remote', uris: null,
+        offer: {types: ['text/uri-list'], files: [{name: 'report.pdf', size: 3}]}};
+    const f = fixture({entries: [file], onReceive: async () => { throw new Error('接收已取消'); }});
+    await f.widgets.find(w => w.label === '接收并准备粘贴').events.clicked();
+    assert.match(f.dialog.status.label, /接收已取消/);
 });

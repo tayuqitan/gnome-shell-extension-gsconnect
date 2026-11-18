@@ -24,8 +24,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <key name="experimental-clipboard-paste-gate" type="b">
       <default>false</default>
-      <summary>Experimental original Ctrl+V gate for file clipboard reads</summary>
-      <description>Requires a session restart. Denies file reads outside a short Ctrl+V window; no simulated input. Not yet validated on RHEL.</description>
+      <summary>Reserved legacy clipboard experiment (unused)</summary>
+      <description>Kept for settings compatibility only. Files now require an explicit receive action before normal local clipboard publication; this setting no longer grabs Ctrl+V.</description>
     </key>
 
     <!-- Service Settings -->

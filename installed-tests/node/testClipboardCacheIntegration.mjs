@@ -23,6 +23,8 @@ function setup() {
     vm.runInNewContext(source, scope);
     const rich = Object.create(scope.RichClipboard.prototype);
     rich.cacheWriters = new Map();
+    // This suite isolates storage after an explicit action has been authorized.
+    rich.fileReceiveCurrent = () => true;
     rich.notifyProgress = () => {};
     rich.request = async (_remote, {index}) => events.push(`write:${index}`);
     const remote = {files: [{name: 'a', size: 1}, {name: 'b', size: 1}]};
@@ -50,4 +52,13 @@ test('rollback waits for cancelled writer settlement', async () => {
     settle();
     await assert.rejects(result, /cancelled/);
     assert.deepEqual(events, ['reserve', 'rollback']);
+});
+
+
+test('revocation before cache commit rolls back without exposing paths', async () => {
+    const {rich, remote, events} = setup();
+    let checks = 0;
+    rich.fileReceiveCurrent = () => ++checks === 1;
+    await assert.rejects(rich.fetchFiles(remote), /cancelled/);
+    assert.deepEqual(events, ['reserve', 'write:0', 'write:1', 'rollback']);
 });

@@ -556,3 +556,31 @@ This hardening does not authenticate clipboard readers, observe every unreported
 state transition, or cancel transfers already authorized before revocation. It does
 not change the one-second shared window or provide strict Ctrl+V-only guarantees.
 Real desktop delivery and application compatibility still require GUI validation.
+
+### Explicit file receiving replaces keyboard gating (2026-11-18)
+
+Production file offers now retain metadata without publishing a lazy network-backed
+URI source. Only the notification/history action labeled “接收并准备粘贴” authorizes
+receiving, bound to an immutable offer snapshot and a local action token. File
+request primitives also check that explicit authorization is still current. All
+files must finish validation and cache commit before a local-only URI provider is
+published. Non-file lazy transfer behavior is unchanged. The legacy experimental
+setting remains schema-compatible but production no longer grabs Ctrl+V.
+
+Cancellation, disconnect, offer/history replacement, permission revocation and
+shared clipboard generation changes block pending publication. Shell ownership is
+verified after publication rather than treating our own OwnerChange as a foreign
+copy. Versioned requests reject changed sender offers. Repeated actions coalesce;
+a whole-action deadline cancels pending file transfers. Notification failures do
+not create authorization or prevent transaction cleanup.
+
+Cancellation cannot interrupt a publication/ownership-check D-Bus call already in
+flight: unique-ID cleanup follows its return or its existing timeout, and cleanup
+failure is logged. Completed cache data remains accounted, not securely erased.
+This is a control-flow guarantee against background file-prefetch downloads, not
+malicious same-UID isolation, peer trust proof, or real desktop/two-host validation.
+
+Validation: 308 synthetic Node tests pass (31 explicit-receive cases), the actual
+clipboard component's mock D-Bus contract passes, 57 Python tests pass, changed
+production/UI tests pass ESLint, schema strict dry-run and Meson compile pass.
+No live clipboard, discovery service or network-transfer test was run for this change.

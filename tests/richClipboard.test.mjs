@@ -225,6 +225,9 @@ test('whole-paste cancellation stops active transfer and prevents subsequent fil
         connect(fn) { callbacks.set(++id, fn); return id; },
         disconnect(key) { callbacks.delete(key); },
         cancel() { canceled = true; for (const callback of callbacks.values()) callback(); }};
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     const downloading = r.helper.fetchFiles(r.helper.remote, cancellation);
     const failed = assert.rejects(downloading, /cancelled/);
     const pending = [...r.helper.pending.values()][0];
@@ -318,6 +321,9 @@ test('canceling the first shared file reader leaves the second reader alive', as
             cancel() { canceled = true; handler?.(); }};
     };
     const first = token(), second = token();
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     const one = r.helper.getFiles(r.helper.remote, first);
     const failed = assert.rejects(one, /cancelled/);
     const two = r.helper.getFiles(r.helper.remote, second);
@@ -343,6 +349,9 @@ test('shared transfer is canceled only when the final reader cancels', async () 
             cancel() { canceled = true; handler?.(); }};
     };
     const first = token(), second = token();
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     const one = r.helper.getFiles(r.helper.remote, first), two = r.helper.getFiles(r.helper.remote, second);
     const failureOne = assert.rejects(one, /cancelled/), failureTwo = assert.rejects(two, /cancelled/);
     await Promise.resolve();
@@ -357,8 +366,11 @@ test('GNOME progress reports aggregate bytes, cancel action, and completion', as
     r.device.showNotification = notification => notifications.push(notification);
     await r.helper.accept(offer({types: ['text/uri-list'],
         files: [{name: 'one.docx', size: 3}, {name: 'two.xlsx', size: 4}]}));
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     const reading = r.helper.fetchFiles(r.helper.remote);
-    assert.equal(notifications[0].buttons[0].action, 'clipboardCancel');
+    assert.equal(notifications.find(n => n.buttons?.[0]?.action === 'clipboardCancel').buttons[0].action, 'clipboardCancel');
     let request = r.sent.at(-1).body.request;
     await r.helper.receive(packet({op: 'value', id: 'offer-1', request}, 3));
     await Promise.resolve();
@@ -374,6 +386,9 @@ test('GNOME progress shows failure without a success notification', async () => 
     r.device.showNotification = notification => notifications.push(notification);
     await r.helper.accept(offer({types: ['text/uri-list'], files: [{name: 'one.docx', size: 3}]}));
     r.helper.request = async () => { throw new Error('Disk full'); };
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     await assert.rejects(r.helper.fetchFiles(r.helper.remote), /Disk full/);
     assert.match(notifications.at(-1).body, /Failed:.*\nDisk full/);
     assert.equal(notifications.some(item => item.body.startsWith('Completed:')), false);
@@ -383,6 +398,9 @@ test('notification cancellation stops the shared download and reports cancelled'
     const r = await rig(); const notifications = [];
     r.device.showNotification = notification => notifications.push(notification);
     await r.helper.accept(offer({types: ['text/uri-list'], files: [{name: 'one.docx', size: 3}]}));
+    // Internal transfer primitive under an explicit action lease.
+    r.helper.remote.authorized = true;
+    r.helper.remote.receiveGeneration = r.clipboard.generation;
     const reading = r.helper.getFiles(r.helper.remote);
     const failed = assert.rejects(reading, /cancelled/);
     await Promise.resolve();
@@ -660,5 +678,17 @@ for (const phase of ['stat', 'open', 'opened-info']) {
         assert.equal(r.transfers[0].abandoned, true);
         assert.equal(r.helper.serving.size, 0);
         assert.equal(streamClosed, phase === 'opened-info');
+    });
+}
+
+
+for (const changed of [{revision: 2}, {origin: 'other-peer'}]) {
+    test(`sender rejects a request bound to a changed offer ${Object.keys(changed)[0]}`, async () => {
+        const r = await rig();
+        r.helper.local = {id: 'versioned-file', revision: 1, origin: 'peer',
+            generation: 1, files: [], types: ['image/png']};
+        await assert.rejects(r.helper.serve({id: 'versioned-file', request: 'r',
+            revision: 1, origin: 'peer', mime: 'image/png', ...changed}), /version changed/);
+        assert.equal(r.transfers.length, 0);
     });
 }

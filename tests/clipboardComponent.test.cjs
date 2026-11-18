@@ -25,5 +25,9 @@ c._clipboard.handler=async()=>reply('');await c.offer('r',['image/png'],async()=
 await c.clearOffer('wrong');assert.equal(c._offer.id,'r');await c.clearOffer('r');assert.equal(c._offer,null);
 c._mimetypes=['image/png'];let finish;c._clipboard.handler=()=>new Promise(r=>{finish=r;});const read=c.readValue('image/png');c._generation++;finish(reply([1]));await assert.rejects(read,/changed/);
 c._clipboard.handler=async()=>reply('');await c.offer('r',['image/png'],()=>new Promise(()=>{}));const request=c._onValueRequested(c._clipboard,['r','q2','image/png']);await Promise.resolve();await c.clearOffer('r');await request;assert.equal(timers.size,0);assert.equal(c._requests.size,0);
+c._available=true;c._clipboard.handler=async m=>reply(m==='GetOffer'?'verified':'');await c.offer('verified',['text/uri-list'],()=>new Uint8Array([1]));
+const ownGeneration=c.generation;await c._onOwnerChange();assert.ok(c.generation>ownGeneration);assert.equal(await c.isCurrentOffer('verified'),true);
+c._clipboard.handler=async()=>reply('another-owner');assert.equal(await c.isCurrentOffer('verified'),false);assert.equal(await c.isCurrentOffer('wrong'),false);
+let ownerReply;c._clipboard.handler=()=>new Promise(resolve=>{ownerReply=resolve;});const checking=c.isCurrentOffer('verified');c._offer={id:'replacement'};ownerReply(reply('verified'));assert.equal(await checking,false);
 console.log('PASS component mocks: local signal, remote echo suppression, offer/resolve, wrong-id clear, stale read, callback cancellation');
 })().catch(e=>{console.error(e);process.exitCode=1;});

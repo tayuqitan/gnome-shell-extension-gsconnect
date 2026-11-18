@@ -126,6 +126,15 @@ const Clipboard = GObject.registerClass({
         }
     }
 
+    async isCurrentOffer(id) {
+        const offer = this._offer;
+        if (!this.available || offer?.id !== id)
+            return false;
+        const reply = await this._call('GetOffer', null);
+        // OwnerChange can increment generation for our own publication too.
+        return this._offer === offer && reply.deepUnpack()[0] === id;
+    }
+
     async clearOffer(id) {
         if (this._offer?.id !== id)
             return;
