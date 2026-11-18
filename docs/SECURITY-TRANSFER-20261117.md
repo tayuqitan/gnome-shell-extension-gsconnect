@@ -584,3 +584,30 @@ Validation: 308 synthetic Node tests pass (31 explicit-receive cases), the actua
 clipboard component's mock D-Bus contract passes, 57 Python tests pass, changed
 production/UI tests pass ESLint, schema strict dry-run and Meson compile pass.
 No live clipboard, discovery service or network-transfer test was run for this change.
+
+### RHEL 10.2 non-network package verification (2026-11-18)
+
+Both test VMs passed the eight scenarios in
+`installed-tests/gjs/testExplicitFileReceive.js` using their actual GJS/Gio/GLib
+and the production rich-clipboard/history/cache modules from the built ZIP.
+Transport, desktop ownership and notification delivery were synthetic. The cases
+cover metadata/history/unauthorized reads, explicit coalesced receiving, exact
+private cached bytes, cancellation, generation change, disconnect, write failure,
+stale revision token and simultaneous history actions. Failed transactions release
+the real filesystem cache quota without publishing partial URIs.
+
+The ZIP SHA-256 was
+`9faf62e3bbefe868a7ebac93a16a5c386a7f7e6d84eef62739bc9aa8ff985089`.
+All 82 tracked source files matched the tree published as `1654fdf`; 213 archive
+entries passed duplicate/path/symlink and size checks. Upload hashes were read back
+on each VM before execution. Both final runs passed 8/8 and removed their temporary
+directories. Tests used a fresh private directory under the test account, empty
+HOME/XDG directories, memory GSettings, no session/display environment, core dumps
+disabled and a 50-second timeout. The script also refuses an ordinary HOME/cache.
+
+Run only with a fresh `.gsconnect-receive-check.XXXXXXXX` working directory and
+`HOME=$PWD/home`, `XDG_CACHE_HOME=$PWD/cache`, with display/session-bus environment
+removed; invoke `gjs -m /path/to/testExplicitFileReceive.js /path/to/unpacked-zip`.
+No extension was installed; no real clipboard, discovery, pairing, network payload,
+GUI notification or two-machine transfer was exercised. This extends component
+and target-runtime evidence, not desktop acceptance.
