@@ -637,3 +637,35 @@ the synthetic GTK window, not the user's screen.
 This verifies actual GTK construction/layout/callback presentation on the target
 runtime, not real notification-center buttons, actual file receipt, application
 paste, pairing, or two-machine transfer. It is not a same-UID security sandbox.
+
+## 2026-11-18：显式接收通知动作的合成链路验证
+
+在两台 RHEL 10.2 测试机的独立临时目录重新运行
+`installed-tests/gjs/testExplicitFileReceive.js`，每台 **11/11 通过**。
+新增 3 组场景覆盖通知动作的生产方法链路：
+`Device.showNotification` → `daemon._device` → `Plugin._activateAction`
+→ `ClipboardPlugin.clipboardReceiveFiles` → `RichClipboard.receiveFiles`。
+测试从已核验 ZIP 提取原方法正文以及生产 Variant unpacker，不导入或启动
+Device/daemon/plugin 初始化过程。动作分发使用真实 `GLib.Variant('(ssbv)')`、
+`Gio.SimpleAction` 与 `Gio.SimpleActionGroup`，通知呈现器仍为记录型替身。
+
+验证结果：
+- 通知生成本身无下载/剪贴板发布；明确按钮传递设备 ID、动作名及 offer token。
+- 重复激活经完整方法链路合并为一批；完整文件落盘后才发布本地 URI。
+- 完成通知使用原通知 ID，移除旧接收按钮。
+- 旧通知点击不能授权新 revision，并经生产插件生成错误反馈。
+- disabled GAction 忽略激活；即使重新启用动作，断线状态仍独立拒绝接收。
+
+包 SHA-256：`9faf62e3bbefe868a7ebac93a16a5c386a7f7e6d84eef62739bc9aa8ff985089`。
+最终测试脚本 SHA-256：`0735ab26ef650409503d7c31e330f4b5e99f2e88f93f41609373c40b0b88b081`。
+上传逐项哈希回读，解压前拒绝绝对路径、父目录穿越、重复项、符号链接及超额大小。
+执行环境为空 HOME/XDG、无 DISPLAY/WAYLAND/D-Bus 地址，memory settings，
+禁用 core，50 秒超时并设置 kill-after；两个临时目录均已删除且核验不存在。
+`G_DEBUG=fatal-criticals` 下最终执行均 exit 0，无 GJS 警告。
+初次夹具将字符串直接传给 `Gio.SimpleAction.parameter_type`，被原生类型检查拒绝；
+改用 `GLib.VariantType('s')` 后重跑成功，没有更改生产实现或系统设置。
+
+边界：这验证真实生产方法和原生动作/Variant 契约，不验证通知中心实际显示、
+真实点击来源、生产服务初始化/权限设置或恶意同 UID 隔离。
+通知渲染、网络传输和剪贴板均为合成边缘，不是双机真实传输或桌面验收。
+NAT、SSH、真实配对、真实剪贴板及系统服务保持不变。

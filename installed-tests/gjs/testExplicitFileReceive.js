@@ -225,4 +225,157 @@ await check('same-tick history receives coalesce with real Gio cancellation obje
         f.rich.destroy();
     }
 });
+/**
+ * Load a single production method without importing service initializers.
+ *
+ * @param {string} file - Packaged source path
+ * @param {string} name - Method name
+ * @param {object} gio - Gio boundary used by this method
+ * @returns {function(object, object): void} Unmodified production method
+ */
+function productionMethod(file, name, gio = Gio) {
+    const [, bytes] = GLib.file_get_contents(`${root}/${file}`);
+    const source = new TextDecoder().decode(bytes);
+    const match = source.match(new RegExp(`^    (?:async )?${name}\\([^]*?^    }`, 'm'));
+    assert(Boolean(match), `missing production method ${name}`);
+    return new Function('Gio', 'GLib', 'logError',
+        `return ({${match[0]}}).${name};`)(gio, GLib, error => {
+        throw error;
+    });
+}
+/**
+ * Join actual notification routing with in-process GActions and real Variants.
+ * Only the notification renderer and transport/clipboard edges are synthetic.
+ *
+ * @param {object} f - Receive fixture
+ * @returns {object} Notification records and explicit activation controls
+ */
+function notificationRoute(f) {
+    const records = [], pending = [];
+    class Notification {
+        constructor() {
+            this.buttons = [];
+        }
+
+        set_title(value) {
+            this.title = value;
+        }
+
+        set_body(value) {
+            this.body = value;
+        }
+
+        set_icon(value) {
+            this.icon = value;
+        }
+
+        set_priority(value) {
+            this.priority = value;
+        }
+
+        add_button_with_target(label, action, target) {
+            this.buttons.push({label, action, target});
+        }
+
+        set_default_action_and_target() {
+            throw new Error('Receiving must require the explicit button');
+        }
+    }
+    const gio = {Notification, ThemedIcon: Gio.ThemedIcon,
+        NotificationPriority: Gio.NotificationPriority};
+    const show = productionMethod('service/device.js', 'showNotification', gio);
+    const device = {id: 'synthetic-device', name: 'Synthetic peer',
+        icon_name: 'computer-symbolic',
+        service: {send_notification: (id, notification) => records.push({id, notification})}};
+    f.device.showNotification = params => show.call(device, params);
+    const receive = productionMethod('service/plugins/clipboard.js', 'clipboardReceiveFiles');
+    const activate = productionMethod('service/plugin.js', '_activateAction');
+    const plugin = {_rich: f.rich, device: f.device,
+        clipboardReceiveFiles(token) {
+            pending.push(receive.call(this, token));
+        }};
+    // Load only the production Variant unpacker, not its service initializer.
+    const [, bytes] = GLib.file_get_contents(`${root}/service/init.js`);
+    const unpack = new TextDecoder().decode(bytes).match(/^function _full_unpack\([^]*?^}/m);
+    assert(Boolean(unpack), 'production Variant unpacker exists');
+    GLib.Variant.prototype.full_unpack = new Function('GLib', 'Gio',
+        `${unpack[0]}; return _full_unpack;`)(GLib, Gio);
+    const actions = new Gio.SimpleActionGroup();
+    const action = new Gio.SimpleAction({name: 'clipboardReceiveFiles', parameter_type: new GLib.VariantType('s')});
+    action.connect('activate', (...args) => activate.call(plugin, ...args));
+    actions.add_action(action);
+    const route = productionMethod('service/daemon.js', '_device');
+    const daemon = {manager: {devices: new Map([[device.id, actions]])}};
+    return {records, action,
+        click(record) {
+            const button = record.notification.buttons[0];
+            assert(button.action === 'app.device', 'notification uses application router');
+            assert(button.target.get_type_string() === '(ssbv)', 'typed routing envelope');
+            const fields = button.target.deepUnpack();
+            assert(fields[0] === device.id && fields[1] === 'clipboardReceiveFiles' && fields[2],
+                'target device and action preserved');
+            route.call(daemon, null, button.target);
+        },
+        async settle() {
+            await Promise.all(pending);
+        }};
+}
+await check('notification button routes production methods into one explicit receive', async () => {
+    const f = fixture();
+    try {
+        const route = notificationRoute(f);
+        const writes = localTransport(f);
+        await f.rich.accept(offer());
+        assert(writes() === 0 && f.publications.length === 0, 'notification alone has no transfer');
+        const ready = route.records[0];
+        assert(ready.notification.buttons[0].label === '接收并准备粘贴', 'explicit receive label');
+        route.click(ready);
+        route.click(ready);
+        await route.settle();
+        assert(writes() === 2 && f.publications.length === 1, 'two clicks coalesce into one batch');
+        const success = route.records.find(item => item.notification.title === '文件已接收');
+        assert(Boolean(success) && success.id === ready.id, 'success replaces offer notification');
+        assert(success.notification.buttons.length === 0, 'completed notification has no stale button');
+    } finally {
+        f.rich.destroy();
+    }
+});
+await check('old notification routes to visible error without authorizing replacement offer', async () => {
+    const f = fixture();
+    try {
+        const route = notificationRoute(f);
+        const writes = localTransport(f);
+        await f.rich.accept(offer());
+        const old = route.records[0];
+        await f.rich.accept(offer(2));
+        route.click(old);
+        await route.settle();
+        assert(writes() === 0 && f.publications.length === 0, 'old token cannot start receive');
+        assert(route.records.some(item => item.notification.title === '无法接收文件' &&
+            item.notification.body.includes('已改变')), 'plugin emits actionable stale error');
+    } finally {
+        f.rich.destroy();
+    }
+});
+await check('disabled action and disconnected receive both fail without transfer', async () => {
+    const f = fixture();
+    try {
+        const route = notificationRoute(f);
+        const writes = localTransport(f);
+        await f.rich.accept(offer());
+        route.action.set_enabled(false);
+        route.click(route.records[0]);
+        await route.settle();
+        assert(route.records.length === 1 && writes() === 0, 'disabled GAction ignores click');
+        route.action.set_enabled(true);
+        f.device.connected = false;
+        route.click(route.records[0]);
+        await route.settle();
+        assert(writes() === 0 && f.publications.length === 0, 'disconnect independently denies receive');
+        assert(route.records.some(item => item.notification.title === '无法接收文件'),
+            'connected-state rejection produces error notification');
+    } finally {
+        f.rich.destroy();
+    }
+});
 print(`PASS explicit receive: ${passed}/${passed}; synthetic transport/desktop, real GJS/Gio/cache`);
