@@ -378,4 +378,132 @@ await check('disabled action and disconnected receive both fail without transfer
         f.rich.destroy();
     }
 });
+/**
+ * Connect two production orchestrators through a synthetic in-memory transport.
+ * Source files, Gio streams, request validation and cache commits remain real.
+ *
+ * @param {string} mode - Optional synthetic fault
+ * @returns {object} Paired fixtures and packet-drain controls
+ */
+function pairedTransport(mode) {
+    const sender = fixture(), receiver = fixture();
+    const jobs = [], streams = new Map(), requests = [], rejected = [];
+    let copies = 0;
+    const dispatch = (target, packet) => {
+        const wire = JSON.parse(JSON.stringify(packet));
+        wire.hasPayload = () => Number.isSafeInteger(wire.payloadSize);
+        jobs.push(target.rich.handle(wire));
+    };
+    sender.device.sendPacket = packet => dispatch(receiver, packet);
+    receiver.device.sendPacket = packet => {
+        if (packet.body.op === 'request')
+            requests.push(packet.body);
+        dispatch(sender, packet);
+    };
+    sender.device.createTransfer = () => ({cancellable: new Gio.Cancellable(),
+        addStream(packet, stream, size) {
+            Object.assign(this, {packet, stream, size});
+        },
+        async start() {
+            streams.set(this.packet.body.request, this.stream);
+            try {
+                const packet = {...this.packet, payloadSize: this.size + (mode === 'size' ? 1 : 0)};
+                packet.hasPayload = () => true;
+                await receiver.rich.handle(packet);
+            } finally {
+                streams.delete(this.packet.body.request);
+            }
+        },
+        cancel() {
+            this.cancellable.cancel();
+        },
+        abandon() {
+            this.cancel();
+        }});
+    receiver.device.rejectTransfer = packet => rejected.push(packet.body.request);
+    receiver.device.createTransfer = () => ({addFile(packet, file) {
+        Object.assign(this, {packet, file});
+    },
+    start(cancellable) {
+        assert(!cancellable.is_cancelled(), 'active receive token');
+        const stream = streams.get(this.packet.body.request);
+        assert(Boolean(stream), 'request-specific source stream');
+        const bytes = stream.read_bytes(this.packet.payloadSize + 1, cancellable).get_data();
+        assert(bytes.length === this.packet.payloadSize, 'complete synthetic payload');
+        this.file.replace_contents(bytes, null, false, Gio.FileCreateFlags.PRIVATE, cancellable);
+        copies++;
+    },
+    cancel() {}});
+    return {sender, receiver, requests, rejected, copies: () => copies,
+        async drain() {
+            while (jobs.length)
+                await jobs.shift();
+        },
+        destroy() {
+            sender.rich.destroy();
+            receiver.rich.destroy();
+        }};
+}
+// Promise wrappers are local to this isolated process; no service init is run.
+Gio._promisify(Gio.File.prototype, 'query_info_async', 'query_info_finish');
+Gio._promisify(Gio.File.prototype, 'read_async', 'read_finish');
+Gio._promisify(Gio.FileInputStream.prototype, 'query_info_async', 'query_info_finish');
+for (const mode of ['normal', 'source-changed', 'size']) {
+    await check(`paired production orchestration through memory transport: ${mode}`, async () => {
+        const pair = pairedTransport(mode);
+        const route = notificationRoute(pair.receiver);
+        const source = Gio.File.new_for_path(`${work}/synthetic-${mode}.txt`);
+        source.replace_contents(new TextEncoder().encode('synthetic payload'), null,
+            false, Gio.FileCreateFlags.PRIVATE, null);
+        pair.sender.clipboard.mimetypes = ['text/uri-list'];
+        pair.sender.clipboard.readValue = () =>
+            Promise.resolve(new TextEncoder().encode(`${source.get_uri()}\r\n`));
+        try {
+            await pair.sender.rich.publish();
+            await pair.drain();
+            assert(pair.requests.length === 0 && pair.copies() === 0 &&
+                pair.receiver.publications.length === 0, 'offer exchange cannot download');
+            const offerNotice = route.records.find(item => item.notification.buttons.length);
+            assert(Boolean(offerNotice), 'metadata yields receive notification');
+            if (mode === 'source-changed') {
+                source.replace_contents(new TextEncoder().encode('changed size'), null,
+                    false, Gio.FileCreateFlags.PRIVATE, null);
+            }
+            const before = getClipboardCacheStorage(1048576).snapshot().used;
+            route.click(offerNotice);
+            await route.settle();
+            await pair.drain();
+            assert(pair.requests.length === 1, 'one correlated request');
+            const request = pair.requests[0];
+            assert(request.revision === pair.sender.rich.local.revision &&
+                request.origin === pair.sender.rich.local.origin, 'request binds offered version');
+            assert(pair.receiver.rich.pending.size === 0 && pair.sender.rich.serving.size === 0,
+                'all request and serving state cleared');
+            if (mode === 'normal') {
+                assert(pair.copies() === 1 && pair.receiver.publications.length === 1,
+                    'one payload committed and published');
+                const publication = pair.receiver.publications[0];
+                const bytes = await publication.provider('text/uri-list');
+                const uri = new TextDecoder().decode(bytes).trim();
+                assert(uri.startsWith(`file://${work}/cache/`), 'only private cached URI exposed');
+                const [, contents] = Gio.File.new_for_uri(uri).load_contents(null);
+                assert(new TextDecoder().decode(contents) === 'synthetic payload', 'exact payload');
+                await publication.provider('text/uri-list');
+                assert(pair.requests.length === 1, 'later clipboard reads do not refetch');
+            } else {
+                assert(pair.copies() === 0 && pair.receiver.publications.length === 0,
+                    'invalid source or payload never reaches clipboard');
+                assert(getClipboardCacheStorage(1048576).snapshot().used === before,
+                    'failed batch releases cache allocation');
+                assert(route.records.some(item => item.notification.title === '无法接收文件'),
+                    'error reaches notification layer');
+                if (mode === 'size')
+                    assert(pair.rejected.length === 1, 'invalid payload is explicitly rejected');
+            }
+        } finally {
+            pair.destroy();
+            source.delete(null);
+        }
+    });
+}
 print(`PASS explicit receive: ${passed}/${passed}; synthetic transport/desktop, real GJS/Gio/cache`);
